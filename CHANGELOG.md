@@ -1,9 +1,5 @@
 # CHANGELOG
 
-## 2.0.0-dev.1
-
-- Dev pre-release for v2 workflow validation.
-
 ## 2.0.0
 
 **Complete Rewrite & Major Architecture Update**
