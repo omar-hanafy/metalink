@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <title>JSON LD Fallback Title</title>
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@graph": [
+          {
+            "@type": "WebSite",
+            "@id": "https://example.com/#site",
+            "name": "Graph Site",
+            "url": "https://example.com/"
+          },
+          {
+            "@type": "VideoObject",
+            "@id": "https://example.com/videos/1",
+            "name": "JSON LD Video Title",
+            "description": "JSON LD Video Description",
+            "thumbnailUrl": "/static/video-poster.svg",
+            "uploadDate": "2024-02-03T10:20:30Z",
+            "contentUrl": "/static/video.mp4",
+            "author": {"@type": "Person", "name": "Video Author"}
+          }
+        ]
+      }
+    </script>
+  </head>
+  <body>JSON LD Heavy Body</body>
+</html>

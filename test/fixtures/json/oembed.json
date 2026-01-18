@@ -1,0 +1,15 @@
+{
+  "type": "video",
+  "version": "1.0",
+  "title": "OEmbed Title",
+  "author_name": "OEmbed Author",
+  "author_url": "https://example.com/author",
+  "provider_name": "OEmbed Provider",
+  "provider_url": "https://example.com",
+  "thumbnail_url": "https://example.com/thumb.png",
+  "thumbnail_width": 320,
+  "thumbnail_height": 180,
+  "html": "<iframe></iframe>",
+  "width": 640,
+  "height": 360
+}

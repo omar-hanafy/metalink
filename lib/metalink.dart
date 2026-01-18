@@ -1,233 +1,132 @@
-// lib/metalink.dart
-///
-library;
+// ignore_for_file: always_use_package_imports, unnecessary_library_name
+// Keep these ignores local to this library file while still exporting public APIs.
+library metalink;
 
 import 'dart:async';
 
-import 'package:http/http.dart' as http;
+import 'src/client.dart';
+import 'src/options.dart';
+import 'src/result.dart';
+import 'src/cache/cache_store.dart';
+import 'src/model/link_metadata.dart';
 
-import 'src/core/image_url_analyzer.dart';
-import 'src/core/metadata_cache.dart';
-import 'src/core/metadata_extractor.dart';
-import 'src/core/url_optimizer.dart';
-import 'src/models/image_metadata.dart';
-import 'src/models/link_metadata.dart';
+export 'src/client.dart';
+export 'src/options.dart';
+export 'src/result.dart';
 
-export 'src/core/image_url_analyzer.dart';
-export 'src/core/metadata_cache.dart';
-// Export core functionality
-export 'src/core/metadata_extractor.dart';
-export 'src/core/url_optimizer.dart';
-export 'src/models/content_analysis.dart';
-export 'src/models/image_metadata.dart'; // Export models
-export 'src/models/link_metadata.dart';
-export 'src/models/social_engagement.dart';
+export 'src/cache/cache_store.dart';
+export 'src/cache/cache_key.dart';
+export 'src/cache/memory_cache_store.dart';
+export 'src/cache/hive_cache_store.dart';
 
-/// Main entry point for using the MetaLink package
+export 'src/model/errors.dart';
+export 'src/model/diagnostics.dart';
+export 'src/model/raw_metadata.dart';
+export 'src/model/url_optimization.dart';
+export 'src/model/structured_data.dart';
+export 'src/model/media.dart';
+export 'src/model/icon.dart';
+export 'src/model/oembed.dart';
+export 'src/model/manifest.dart';
+export 'src/model/link_metadata.dart';
+
+/// Convenience one-off API for link metadata extraction.
+///
+/// [MetaLink] provides static methods for quick, stateless interactions where
+/// managing a persistent [MetaLinkClient] is not necessary.
+///
+/// ### Behavior & Performance
+/// * Each method call creates a **new** internal [MetaLinkClient] and closes it immediately after completion.
+/// * This ensures no resources (like HTTP clients) leak, but it prevents connection reuse (Keep-Alive)
+///   across multiple calls.
+/// * For high-throughput applications (e.g., processing a queue of URLs), prefer creating a
+///   long-lived [MetaLinkClient] instead.
+///
+/// ### Usage
+/// ```dart
+/// // Simple extraction
+/// final result = await MetaLink.extract('https://flutter.dev');
+///
+/// // Batch with concurrency
+/// final results = await MetaLink.extractBatch(urls, concurrency: 10);
+/// ```
 class MetaLink {
-  /// Creates a new instance of [MetaLink]
-  MetaLink._({
-    required MetadataExtractor extractor,
-  }) : _extractor = extractor;
-
-  /// Creates a new instance of [MetaLink] with default configuration
+  /// Extracts metadata from a single [url].
   ///
-  /// This method creates a non-cached instance that is suitable for one-time use
-  factory MetaLink.create({
-    http.Client? client,
-    Duration timeout = const Duration(seconds: 10),
-    String? userAgent,
-    bool followRedirects = true,
-    bool optimizeUrls = true,
-    int maxRedirects = 5,
-    bool analyzeImages = true,
-    bool extractStructuredData = true,
-    bool extractSocialMetrics = false,
-    bool analyzeContent = false,
-    String? proxyUrl,
-  }) {
-    final extractor = MetadataExtractor(
-      client: client,
-      timeout: timeout,
-      userAgent: userAgent,
-      cacheEnabled: false,
-      followRedirects: followRedirects,
-      optimizeUrls: optimizeUrls,
-      maxRedirects: maxRedirects,
-      analyzeImages: analyzeImages,
-      extractStructuredData: extractStructuredData,
-      extractSocialMetrics: extractSocialMetrics,
-      analyzeContent: analyzeContent,
-      proxyUrl: proxyUrl,
-    );
-
-    return MetaLink._(extractor: extractor);
-  }
-
-  /// The metadata extractor instance
-  final MetadataExtractor _extractor;
-
-  /// Creates a new instance of [MetaLink] with caching enabled
+  /// This method performs the full extraction pipeline:
+  /// 1. **Resolve**: Follows redirects to find the final URL.
+  /// 2. **Fetch**: Downloads the HTML content (up to configured limits).
+  /// 3. **Extract**: Parses standard meta, OpenGraph, Twitter Cards, and JSON-LD.
   ///
-  /// This method creates a cached instance that is suitable for multiple uses
-  static Future<MetaLink> createWithCache({
-    http.Client? client,
-    Duration timeout = const Duration(seconds: 10),
-    String? userAgent,
-    Duration cacheDuration = const Duration(hours: 4),
-    bool followRedirects = true,
-    bool optimizeUrls = true,
-    int maxRedirects = 5,
-    bool analyzeImages = true,
-    bool extractStructuredData = true,
-    bool extractSocialMetrics = false,
-    bool analyzeContent = false,
-    Future<MetadataCache>? Function()? customCache,
-    String? proxyUrl,
-  }) async {
-    final cache = customCache != null
-        ? await customCache()
-        : await MetadataCacheFactory.getSharedInstance();
-
-    final extractor = MetadataExtractor(
-      client: client,
-      cache: cache,
-      timeout: timeout,
-      userAgent: userAgent,
-      cacheEnabled: true,
-      cacheDuration: cacheDuration,
-      followRedirects: followRedirects,
-      optimizeUrls: optimizeUrls,
-      maxRedirects: maxRedirects,
-      analyzeImages: analyzeImages,
-      extractStructuredData: extractStructuredData,
-      extractSocialMetrics: extractSocialMetrics,
-      analyzeContent: analyzeContent,
-      proxyUrl: proxyUrl,
-    );
-
-    return MetaLink._(extractor: extractor);
-  }
-
-  /// Extracts metadata from the given URL
+  /// ### Caching
+  /// * If [cacheStore] is provided, results are read from/written to it.
+  /// * If [cacheStore] is `null` (default), the internal client is configured with caching **disabled**
+  ///   to avoid the overhead of creating a temporary `MemoryCacheStore` that would be immediately discarded.
   ///
-  /// Parameters:
-  /// - [url]: The URL to extract metadata from
-  /// - [skipCache]: Whether to skip the cache and extract fresh metadata
-  Future<LinkMetadata> extract(String url, {bool skipCache = false}) {
-    return _extractor.extract(url, skipCache: skipCache);
-  }
-
-  /// Extracts metadata for multiple URLs in parallel
-  ///
-  /// Parameters:
-  /// - [urls]: List of URLs to extract metadata from
-  /// - [skipCache]: Whether to skip the cache and extract fresh metadata
-  /// - [concurrentRequests]: Maximum number of concurrent requests to make
-  Future<List<LinkMetadata>> extractMultiple(
-    List<String> urls, {
+  /// Returns an [ExtractionResult] containing the metadata and any warnings/errors encountered.
+  static Future<ExtractionResult<LinkMetadata>> extract(
+    String url, {
+    MetaLinkClientOptions options = const MetaLinkClientOptions(),
+    CacheStore? cacheStore,
     bool skipCache = false,
-    int concurrentRequests = 3,
-  }) {
-    return _extractor.extractMultiple(
-      urls,
-      skipCache: skipCache,
-      concurrentRequests: concurrentRequests,
-    );
-  }
+  }) async {
+    // If no cacheStore is provided, disable caching to avoid creating a short-lived MemoryCacheStore.
+    final effectiveOptions = cacheStore == null
+        ? options.copyWith(
+            cache: options.cache.copyWith(enabled: false),
+          )
+        : options;
 
-  /// Analyzes an image URL and returns detailed metadata
-  ///
-  /// Parameters:
-  /// - [imageUrl]: The URL of the image to analyze
-  /// - [sourceDomain]: The domain of the page where the image was found
-  Future<ImageMetadata> analyzeImage(
-    String imageUrl, {
-    String? sourceDomain,
-  }) {
-    final analyzer = ImageUrlAnalyzer(
-      client: http.Client(),
-      timeout: _extractor.timeout,
-      userAgent: _extractor.userAgent,
-      followRedirects: _extractor.followRedirects,
-      maxRedirects: _extractor.maxRedirects,
-      proxyUrl: _extractor.proxyUrl,
+    final client = MetaLinkClient(
+      options: effectiveOptions,
+      cacheStore: cacheStore,
     );
 
     try {
-      return analyzer.analyze(
-        imageUrl,
-        sourceDomain: sourceDomain,
+      return await client.extract(
+        url,
+        skipCache: skipCache,
       );
     } finally {
-      analyzer.dispose();
+      client.close();
     }
   }
 
-  /// Optimizes the given URL and follows redirects if enabled
+  /// Extracts metadata from a list of [urls] in parallel.
   ///
-  /// Parameters:
-  /// - [url]: The URL to optimize
-  Future<UrlOptimizationResult> optimizeUrl(String url) {
-    final optimizer = UrlOptimizer(
-      client: http.Client(),
-      followRedirects: _extractor.followRedirects,
-      maxRedirects: _extractor.maxRedirects,
-      timeout: _extractor.timeout,
-      userAgent: _extractor.userAgent,
-      proxyUrl: _extractor.proxyUrl,
+  /// Useful for processing bulk lists efficiently. The [concurrency] parameter controls
+  /// how many URLs are processed simultaneously.
+  ///
+  /// ### Error Handling
+  /// * This method does **not** throw if individual URLs fail. Instead, the returned list
+  ///   contains an [ExtractionResult] for each input URL in the corresponding index.
+  /// * Failed URLs will have [ExtractionResult.errors] populated.
+  ///
+  /// Throws [ArgumentError] if [concurrency] is less than 1.
+  static Future<List<ExtractionResult<LinkMetadata>>> extractBatch(
+    List<String> urls, {
+    MetaLinkClientOptions options = const MetaLinkClientOptions(),
+    CacheStore? cacheStore,
+    bool skipCache = false,
+    int concurrency = 4,
+  }) async {
+    if (concurrency < 1) {
+      throw ArgumentError.value(concurrency, 'concurrency', 'Must be >= 1.');
+    }
+
+    final client = MetaLinkClient(
+      options: options,
+      cacheStore: cacheStore,
     );
 
     try {
-      return optimizer.optimize(url);
+      return await client.extractBatch(
+        urls,
+        skipCache: skipCache,
+        concurrency: concurrency,
+      );
     } finally {
-      optimizer.dispose();
-    }
-  }
-
-  /// Closes all resources used by this instance
-  void dispose() {
-    _extractor.dispose();
-  }
-}
-
-/// A simplified interface for quick, one-off metadata extraction
-class SimpleMetaLink {
-  /// Extracts metadata from the given URL
-  ///
-  /// This is a convenience method for one-time extraction
-  static Future<LinkMetadata> extract(String url, {String? proxyUrl}) async {
-    final metalink = MetaLink.create(proxyUrl: proxyUrl);
-    try {
-      return await metalink.extract(url);
-    } finally {
-      metalink.dispose();
-    }
-  }
-
-  /// Analyzes an image URL and returns detailed metadata
-  ///
-  /// This is a convenience method for one-time image analysis
-  static Future<ImageMetadata> analyzeImage(String imageUrl,
-      {String? proxyUrl}) async {
-    final analyzer = ImageUrlAnalyzer(proxyUrl: proxyUrl);
-    try {
-      return await analyzer.analyze(imageUrl);
-    } finally {
-      analyzer.dispose();
-    }
-  }
-
-  /// Optimizes the given URL and follows redirects
-  ///
-  /// This is a convenience method for one-time URL optimization
-  static Future<UrlOptimizationResult> optimizeUrl(String url,
-      {String? proxyUrl}) async {
-    final optimizer = UrlOptimizer(proxyUrl: proxyUrl);
-    try {
-      return await optimizer.optimize(url);
-    } finally {
-      optimizer.dispose();
+      client.close();
     }
   }
 }
