@@ -1,0 +1,14 @@
+name: metalink_example
+description: Example demonstrate the usage of metalink package.
+version: 1.0.0
+publish_to: none
+
+environment:
+  sdk: ^3.9.2
+
+dependencies:
+  metalink:
+    path: ..
+
+dev_dependencies:
+  lints: ^6.0.0

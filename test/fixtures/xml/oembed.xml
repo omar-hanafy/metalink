@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<oembed>
+  <type>photo</type>
+  <version>1.0</version>
+  <title>OEmbed XML</title>
+  <author_name>Xml Author</author_name>
+  <author_url>https://example.com/xml-author</author_url>
+  <provider_name>Xml Provider</provider_name>
+  <provider_url>https://example.com</provider_url>
+  <thumbnail_url>https://example.com/thumb-xml.png</thumbnail_url>
+  <thumbnail_width>120</thumbnail_width>
+  <thumbnail_height>90</thumbnail_height>
+  <width>200</width>
+  <height>100</height>
+</oembed>
