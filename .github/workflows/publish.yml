@@ -1,0 +1,57 @@
+name: Publish
+
+on:
+  push:
+    tags:
+      - "metalink-v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to publish (metalink-vX.Y.Z)"
+        required: true
+        type: string
+
+jobs:
+  publish:
+    if: github.event_name != 'workflow_dispatch'
+    uses: dart-lang/setup-dart/.github/workflows/publish.yml@v1
+    permissions:
+      id-token: write
+      contents: read
+
+  publish-manual:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+      - name: Validate tag
+        run: |
+          TAG="${{ inputs.tag }}"
+          case "$TAG" in
+            metalink-v*) ;;
+            *)
+              echo "Tag must match metalink-vX.Y.Z."
+              exit 1
+              ;;
+          esac
+      - name: Setup Dart
+        uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+      - name: Install dependencies
+        run: dart pub get
+      - name: Publish (token)
+        env:
+          PUB_DEV_TOKEN: ${{ secrets.PUB_DEV_TOKEN }}
+          PUB_TOKEN: ${{ secrets.PUB_DEV_TOKEN }}
+        run: |
+          if [ -z "$PUB_DEV_TOKEN" ]; then
+            echo "PUB_DEV_TOKEN is required for manual workflow_dispatch."
+            exit 1
+          fi
+          dart pub publish -f
