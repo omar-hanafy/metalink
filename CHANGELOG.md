@@ -1,5 +1,9 @@
 # CHANGELOG
 
+## 2.0.1
+
+- Updated runtime dependencies: `xml` to `^7.0.1`, `convert_object` to `^1.1.0`, `hive_ce` to `^2.19.3`, and `html` to `^0.15.6`.
+
 ## 2.0.0
 
 **Complete Rewrite & Major Architecture Update**
