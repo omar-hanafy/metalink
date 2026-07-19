@@ -2,7 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main, dev]
+    branches:
+      - main
+      - dev
   pull_request:
 
 permissions:
@@ -14,36 +16,52 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+        uses: actions/checkout@v7
       - name: Setup Dart (stable)
         uses: dart-lang/setup-dart@v1
         with:
           sdk: stable
-      - name: Version channel check
-        if: github.event_name == 'pull_request' && (github.base_ref == 'main' || github.base_ref == 'dev')
+
+      - name: Validate release lane
+        env:
+          TARGET_LANE: ${{ github.event_name == 'pull_request' && github.base_ref || github.ref_name }}
+        shell: bash
         run: |
-          if git diff --name-only "origin/${{ github.base_ref }}"...HEAD | grep -q '^pubspec.yaml$'; then
-            version=$(awk '/^version:/ {print $2}' pubspec.yaml)
-            if [ "${{ github.base_ref }}" = "main" ]; then
-              if echo "$version" | grep -q '-'; then
-                echo "Main requires a stable version (no pre-release suffix)."
-                exit 1
-              fi
-            else
-              if ! echo "$version" | grep -q '-'; then
-                echo "Dev requires a pre-release version suffix (e.g. -dev.1)."
-                exit 1
-              fi
-            fi
-          else
-            echo "pubspec.yaml not changed; skipping version channel check."
+          set -euo pipefail
+          version=$(awk '/^version:/ {print $2; exit}' pubspec.yaml | tr -d "\"'")
+          stable_pattern='^[0-9]+\.[0-9]+\.[0-9]+(\+[0-9A-Za-z.-]+)?$'
+          prerelease_pattern='^[0-9]+\.[0-9]+\.[0-9]+-[0-9A-Za-z.-]+(\+[0-9A-Za-z.-]+)?$'
+
+          if [[ "$TARGET_LANE" == 'main' && ! "$version" =~ $stable_pattern ]]; then
+            echo "main requires a stable semantic version, got $version."
+            exit 1
           fi
+          if [[ "$TARGET_LANE" == 'dev' && ! "$version" =~ $prerelease_pattern ]]; then
+            echo "dev requires a prerelease semantic version, got $version."
+            exit 1
+          fi
+
       - name: Install dependencies
         run: dart pub get
       - name: Check formatting
         run: dart format --output=none --set-exit-if-changed .
+      - name: Analyze
+        run: dart analyze
+      - name: Test
+        run: dart test
+
+  test-minimum:
+    name: Test on Dart 3.11
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Setup Dart 3.11
+        uses: dart-lang/setup-dart@v1
+        with:
+          sdk: 3.11.0
+      - name: Install dependencies
+        run: dart pub get
       - name: Analyze
         run: dart analyze
       - name: Test
@@ -55,7 +73,7 @@ jobs:
     continue-on-error: true
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Setup Dart (beta)
         uses: dart-lang/setup-dart@v1
         with:
@@ -72,7 +90,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Setup Dart (stable)
         uses: dart-lang/setup-dart@v1
         with:
@@ -80,20 +98,29 @@ jobs:
       - name: Install dependencies
         run: dart pub get
       - name: Install pana
-        run: dart pub global activate pana
+        run: dart pub global activate pana 0.23.14
       - name: Run pana
-        run: |
-          pana --json > pana.json
-          python3 - <<'PY'
-          import json
-          with open('pana.json') as f:
-            data = json.load(f)
-          scores = data.get('scores', {})
-          granted = scores.get('grantedPoints', 0)
-          max_points = scores.get('maxPoints', 0)
-          if max_points == 0:
-            raise SystemExit('pana did not report scores; failing.')
-          if granted != max_points:
-            raise SystemExit(f'pana score {granted}/{max_points} (full score required).')
-          print(f'pana score {granted}/{max_points}')
-          PY
+        run: pana --exit-code-threshold 0 .
+
+  flutter-example:
+    name: Flutter showcase
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Setup Flutter (stable)
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+      - name: Install dependencies
+        working-directory: examples/flutter_link_preview
+        run: flutter pub get
+      - name: Check formatting
+        working-directory: examples/flutter_link_preview
+        run: dart format --output=none --set-exit-if-changed lib test
+      - name: Analyze
+        working-directory: examples/flutter_link_preview
+        run: flutter analyze
+      - name: Test
+        working-directory: examples/flutter_link_preview
+        run: flutter test

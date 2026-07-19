@@ -1,3 +1,4 @@
 tags:
   integration:
   live:
+    skip: Live network smoke tests run only in the dedicated workflow.

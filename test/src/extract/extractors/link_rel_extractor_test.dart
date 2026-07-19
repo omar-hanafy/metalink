@@ -67,7 +67,8 @@ void main() {
   });
 
   test('infers oembed xml format from type', () async {
-    const html = '<link rel="alternate" '
+    const html =
+        '<link rel="alternate" '
         'type="text/xml+oembed" '
         'href="https://example.com/oembed.xml">';
     final oembedUrl = Uri.parse('https://example.com/oembed.xml');

@@ -1,4 +1,5 @@
 import 'package:metalink/src/cache/cache_store.dart';
+import 'package:metalink/src/network/request_policy.dart';
 
 /// Configuration for the network layer of the extraction process.
 ///
@@ -8,6 +9,7 @@ class FetchOptions {
   /// Creates a configuration for network operations.
   const FetchOptions({
     this.timeout = const Duration(seconds: 10),
+    this.totalTimeout = const Duration(seconds: 30),
     this.userAgent,
     this.followRedirects = true,
     this.maxRedirects = 5,
@@ -15,19 +17,28 @@ class FetchOptions {
     this.stopAfterHead = true,
     this.proxyUrl,
     this.headers = const {},
+    this.requestPolicy = const RequestPolicy(),
   });
 
-  /// The maximum duration to wait for a network connection or response.
+  /// The maximum duration for one network attempt.
   ///
-  /// If this limit is exceeded during any phase (HEAD, GET, or redirect),
-  /// a `TimeoutException` is thrown and the request is aborted.
+  /// If this limit is exceeded, the active request is aborted. Redirects and
+  /// enrichments still share the complete-operation [totalTimeout].
   ///
   /// Defaults to 10 seconds.
   final Duration timeout;
 
+  /// The complete deadline shared by redirects and related network work.
+  ///
+  /// This prevents a redirect chain or sequential enrichment requests from
+  /// multiplying [timeout] into an unexpectedly long operation.
+  final Duration totalTimeout;
+
   /// The value for the `User-Agent` HTTP header.
   ///
-  /// If `null`, a default user agent indicating `MetaLink/2.0.0` will be used.
+  /// If `null`, MetaLink uses a stable package user agent without embedding a
+  /// version number that can drift from the package manifest.
+  /// An explicit `User-Agent` in [headers] takes precedence over this value.
   /// Some servers may block requests with missing or generic user agents.
   final String? userAgent;
 
@@ -41,7 +52,7 @@ class FetchOptions {
 
   /// The maximum number of redirects to follow before aborting.
   ///
-  /// This prevents infinite redirect loops. If the limit is reached,
+  /// This prevents infinite redirect loops. If the limit is exceeded,
   /// the client stops and may return an error or the last response depending on context.
   ///
   /// Defaults to 5.
@@ -70,15 +81,25 @@ class FetchOptions {
   /// Supported patterns depend on the implementation (e.g., standard prefix or placeholder replacement).
   final String? proxyUrl;
 
-  /// Additional HTTP headers to send with every request.
+  /// Base HTTP headers supplied for every request.
   ///
   /// These are merged with default headers (like `Accept` and `User-Agent`).
-  /// Keys are case-insensitive.
+  /// Keys are case-insensitive. The active [requestPolicy] may remove sensitive
+  /// entries for enrichment, proxy, or cross-origin redirect boundaries.
   final Map<String, String> headers;
+
+  /// Admission and credential-boundary rules for every request target.
+  ///
+  /// The compatibility default accepts public and private HTTP(S) targets but
+  /// strips sensitive headers across origins. Use [RequestPolicy.secure] when
+  /// processing untrusted URLs. MetaLink 3 is expected to make the secure
+  /// preset the default.
+  final RequestPolicy requestPolicy;
 
   /// Creates a copy of this options object with the given fields replaced.
   FetchOptions copyWith({
     Duration? timeout,
+    Duration? totalTimeout,
     String? userAgent,
     bool? followRedirects,
     int? maxRedirects,
@@ -86,9 +107,11 @@ class FetchOptions {
     bool? stopAfterHead,
     String? proxyUrl,
     Map<String, String>? headers,
+    RequestPolicy? requestPolicy,
   }) {
     return FetchOptions(
       timeout: timeout ?? this.timeout,
+      totalTimeout: totalTimeout ?? this.totalTimeout,
       userAgent: userAgent ?? this.userAgent,
       followRedirects: followRedirects ?? this.followRedirects,
       maxRedirects: maxRedirects ?? this.maxRedirects,
@@ -96,6 +119,7 @@ class FetchOptions {
       stopAfterHead: stopAfterHead ?? this.stopAfterHead,
       proxyUrl: proxyUrl ?? this.proxyUrl,
       headers: headers ?? this.headers,
+      requestPolicy: requestPolicy ?? this.requestPolicy,
     );
   }
 }
@@ -158,7 +182,7 @@ class ExtractOptions {
   /// Defaults to `false` to avoid implicit network calls.
   final bool enableManifest;
 
-  /// Whether to populate `LinkMetadata.raw` with raw key-value pairs from the DOM.
+  /// Whether to populate `ExtractionResult.raw` with raw key-value pairs from the DOM.
   ///
   /// Useful for debugging or accessing non-standard tags not normalized by `MetaLink`.
   /// Defaults to `false` to save memory.
@@ -246,9 +270,10 @@ class CacheOptions {
 
   /// The type of data to store in the cache.
   ///
-  /// * [CachePayloadKind.linkMetadata]: Stores only the final resolved `LinkMetadata`. Smaller size.
+  /// * [CachePayloadKind.linkMetadata]: Stores only the final resolved
+  ///   `LinkMetadata`. This is the compact, backward-compatible default.
   /// * [CachePayloadKind.extractionResult]: Stores the full `ExtractionResult`, including diagnostics,
-  ///   warnings, and errors. Useful if debugging information needs to be preserved.
+  ///   warnings, errors, status, and provenance.
   final CachePayloadKind payloadKind;
 
   /// Creates a copy of this options object with the given fields replaced.

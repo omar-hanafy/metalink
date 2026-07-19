@@ -50,18 +50,81 @@ void main() {
       cacheHit: true,
       totalTime: Duration(milliseconds: 5),
       fetch: null,
+      provenanceAvailable: false,
       fieldProvenance: {
         MetaField.title: FieldProvenance(
           source: CandidateSource.openGraph,
           score: 0.9,
         ),
       },
+      itemProvenance: {
+        MetaField.images: [
+          ItemProvenance(
+            itemKey: 'https://example.com/image.png',
+            provenance: FieldProvenance(
+              source: CandidateSource.openGraph,
+              score: 0.8,
+            ),
+            contributors: [
+              FieldProvenance(source: CandidateSource.openGraph, score: 0.8),
+              FieldProvenance(source: CandidateSource.twitterCard, score: 0.7),
+            ],
+          ),
+        ],
+      },
+      candidateDecisions: {
+        MetaField.title: [
+          CandidateDecision(
+            valueKey: 'Title',
+            source: CandidateSource.openGraph,
+            score: 0.9,
+            effectiveScore: 0.9,
+            selected: true,
+          ),
+        ],
+      },
     );
 
     final decoded = ExtractionDiagnostics.fromJson(diag.toJson());
     expect(decoded.cacheHit, isTrue);
     expect(decoded.totalTime.inMilliseconds, 5);
+    expect(decoded.provenanceAvailable, isFalse);
     expect(decoded.fieldProvenance[MetaField.title]!.score, 0.9);
+    expect(
+      decoded.itemProvenance[MetaField.images]?.single.itemKey,
+      'https://example.com/image.png',
+    );
+    expect(
+      decoded.itemProvenance[MetaField.images]?.single.contributors.map(
+        (contributor) => contributor.source,
+      ),
+      <CandidateSource>[CandidateSource.openGraph, CandidateSource.twitterCard],
+    );
+    expect(
+      decoded.candidateDecisions[MetaField.title]?.single.selected,
+      isTrue,
+    );
+  });
+
+  test('legacy diagnostics default provenance availability to true', () {
+    final decoded = ExtractionDiagnostics.fromJson({
+      'cacheHit': false,
+      'totalTimeMs': 1,
+      'fieldProvenance': const <String, dynamic>{},
+    });
+
+    expect(decoded.provenanceAvailable, isTrue);
+  });
+
+  test('legacy item provenance treats the leading source as a contributor', () {
+    final decoded = ItemProvenance.fromJson({
+      'itemKey': 'https://example.com/image.png',
+      'provenance': {'source': 'openGraph', 'score': 0.8},
+    });
+
+    expect(decoded.contributors, hasLength(1));
+    expect(decoded.contributors.single.source, CandidateSource.openGraph);
+    expect(decoded.contributors.single.score, 0.8);
   });
 
   test('ExtractionDiagnostics ignores invalid fieldProvenance entries', () {

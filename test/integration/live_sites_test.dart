@@ -37,9 +37,10 @@ void main() {
       expect(result.metadata.description, isNotEmpty);
       // Flutter site usually has a favicon or OG image
       expect(
-          result.metadata.images.isNotEmpty || result.metadata.icons.isNotEmpty,
-          isTrue,
-          reason: 'Should find at least one image or icon');
+        result.metadata.images.isNotEmpty || result.metadata.icons.isNotEmpty,
+        isTrue,
+        reason: 'Should find at least one image or icon',
+      );
     });
   });
 }

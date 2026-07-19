@@ -87,7 +87,7 @@ class OpenGraphExtractor implements HtmlMetadataExtractorStage {
       doc,
       'meta[property="og:type"], meta[name="og:type"]',
     );
-    final kind = _mapOgTypeToKind(ogType, context.baseUrl);
+    final kind = _mapOgTypeToKind(ogType, context.documentUrl);
     if (kind != null) {
       context.setKind(
         kind,
@@ -123,14 +123,21 @@ class OpenGraphExtractor implements HtmlMetadataExtractorStage {
       final value = content?.trim();
       if (value == null || value.isEmpty) continue;
 
-      if (prop == 'og:image' ||
-          prop == 'og:image:url' ||
-          prop == 'og:image:secure_url') {
+      if (prop == 'og:image' || prop == 'og:image:url') {
         final uri = context.urlResolver.resolve(context.baseUrl, value);
         if (uri == null) continue;
 
         commitImage();
         currentImage = ImageCandidate(url: uri);
+      } else if (prop == 'og:image:secure_url') {
+        final uri = context.urlResolver.resolve(context.baseUrl, value);
+        if (uri == null) continue;
+
+        // secure_url is a structured property of the preceding image, not a
+        // second root image. Prefer it while retaining dimensions and alt text.
+        currentImage = currentImage == null
+            ? ImageCandidate(url: uri)
+            : _copyImage(currentImage!, url: uri);
       } else if (currentImage != null) {
         if (prop == 'og:image:width') {
           final w = int.tryParse(value);
@@ -249,13 +256,14 @@ class OpenGraphExtractor implements HtmlMetadataExtractorStage {
 
   static ImageCandidate _copyImage(
     ImageCandidate input, {
+    Uri? url,
     int? width,
     int? height,
     String? mimeType,
     String? alt,
   }) {
     return ImageCandidate(
-      url: input.url,
+      url: url ?? input.url,
       width: width ?? input.width,
       height: height ?? input.height,
       mimeType: mimeType ?? input.mimeType,
@@ -311,8 +319,9 @@ class OpenGraphExtractor implements HtmlMetadataExtractorStage {
     if (dt != null) return dt;
 
     // Normalize "YYYY-MM-DD HH:MM:SS" to ISO8601 by adding a T separator.
-    final withT =
-        s.contains(' ') && !s.contains('T') ? s.replaceFirst(' ', 'T') : s;
+    final withT = s.contains(' ') && !s.contains('T')
+        ? s.replaceFirst(' ', 'T')
+        : s;
     return DateTime.tryParse(withT);
   }
 }

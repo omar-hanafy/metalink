@@ -8,10 +8,7 @@ void main() {
     late FixtureServer server;
 
     const enrichOptions = MetaLinkClientOptions(
-      extract: ExtractOptions(
-        enableOEmbed: true,
-        enableManifest: true,
-      ),
+      extract: ExtractOptions(enableOEmbed: true, enableManifest: true),
     );
 
     bool hasWarning(
@@ -53,8 +50,9 @@ void main() {
       expect(result.metadata.kind, LinkKind.article);
       expect(result.metadata.images.length, greaterThanOrEqualTo(2));
       expect(
-        result.metadata.images
-            .any((img) => img.url == server.uri('/static/og-image.svg')),
+        result.metadata.images.any(
+          (img) => img.url == server.uri('/static/og-image.svg'),
+        ),
         isTrue,
       );
       expect(result.metadata.videos, isNotEmpty);
@@ -73,8 +71,9 @@ void main() {
       expect(result.metadata.title, 'Twitter Only Title');
       expect(result.metadata.description, 'Twitter Only Description');
       expect(
-        result.metadata.images
-            .any((img) => img.url == server.uri('/static/twitter-image.svg')),
+        result.metadata.images.any(
+          (img) => img.url == server.uri('/static/twitter-image.svg'),
+        ),
         isTrue,
       );
       expect(
@@ -186,16 +185,18 @@ void main() {
       );
     });
 
-    test('Media rich page extracts multiple images, videos, and audio',
-        () async {
-      final result = await extract('/page/media-rich');
+    test(
+      'Media rich page extracts multiple images, videos, and audio',
+      () async {
+        final result = await extract('/page/media-rich');
 
-      expect(result.isSuccess, isTrue);
-      expect(result.metadata.images.length, greaterThanOrEqualTo(2));
-      expect(result.metadata.videos.length, greaterThanOrEqualTo(2));
-      expect(result.metadata.audios.length, greaterThanOrEqualTo(1));
-      expect(result.metadata.kind, LinkKind.video);
-    });
+        expect(result.isSuccess, isTrue);
+        expect(result.metadata.images.length, greaterThanOrEqualTo(2));
+        expect(result.metadata.videos.length, greaterThanOrEqualTo(2));
+        expect(result.metadata.audios.length, greaterThanOrEqualTo(1));
+        expect(result.metadata.kind, LinkKind.video);
+      },
+    );
 
     test('International page extracts locale and unicode title', () async {
       final result = await extract('/page/i18n');
@@ -211,7 +212,9 @@ void main() {
       expect(result.isSuccess, isTrue);
       expect(result.metadata.resolvedUrl, server.uri('/page/og-rich'));
       expect(
-          result.diagnostics.fetch?.redirects.length, greaterThanOrEqualTo(1));
+        result.diagnostics.fetch?.redirects.length,
+        greaterThanOrEqualTo(1),
+      );
     });
 
     test('Non HTML response returns error', () async {
@@ -239,10 +242,7 @@ void main() {
     test('Large response triggers truncation warning', () async {
       const options = MetaLinkClientOptions(
         fetch: FetchOptions(maxBytes: 512),
-        extract: ExtractOptions(
-          enableOEmbed: true,
-          enableManifest: true,
-        ),
+        extract: ExtractOptions(enableOEmbed: true, enableManifest: true),
       );
 
       final result = await extract('/page/large', options: options);

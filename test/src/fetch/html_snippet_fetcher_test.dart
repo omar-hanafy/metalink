@@ -8,6 +8,54 @@ import 'package:test/test.dart';
 import '../../support/fake_fetcher.dart';
 
 void main() {
+  test('document requests use the stable default user-agent', () async {
+    final fetcher = FakeFetcher();
+    final url = Uri.parse('https://example.com/default-agent');
+    fetcher.registerGetResponse(
+      url,
+      FakeFetcher.buildResponse(
+        url: url,
+        statusCode: 200,
+        headers: const {'content-type': 'text/html'},
+        bodyText: '<html></html>',
+      ),
+    );
+
+    await HtmlSnippetFetcher(
+      fetcher: fetcher,
+    ).fetch(url, options: const FetchOptions(stopAfterHead: false));
+
+    expect(
+      fetcher.requests.single.headers?['user-agent'],
+      'MetaLink (+https://github.com/omar-hanafy/metalink)',
+    );
+  });
+
+  test('explicit user-agent header overrides the dedicated option', () async {
+    final fetcher = FakeFetcher();
+    final url = Uri.parse('https://example.com/header-agent');
+    fetcher.registerGetResponse(
+      url,
+      FakeFetcher.buildResponse(
+        url: url,
+        statusCode: 200,
+        headers: const {'content-type': 'text/html'},
+        bodyText: '<html></html>',
+      ),
+    );
+
+    await HtmlSnippetFetcher(fetcher: fetcher).fetch(
+      url,
+      options: const FetchOptions(
+        stopAfterHead: false,
+        userAgent: 'dedicated-agent',
+        headers: {'User-Agent': 'header-agent'},
+      ),
+    );
+
+    expect(fetcher.requests.single.headers?['user-agent'], 'header-agent');
+  });
+
   test('returns early on non-html content-type from HEAD', () async {
     final fetcher = FakeFetcher();
     final url = Uri.parse('https://example.com/a');
@@ -117,7 +165,7 @@ void main() {
       url,
       options: const FetchOptions(stopAfterHead: false),
     );
-    expect(result.detectedCharset, 'latin1');
+    expect(result.detectedCharset, 'windows-1252');
     expect(result.charsetSource, CharsetSource.header);
   });
 

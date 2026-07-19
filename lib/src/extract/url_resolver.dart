@@ -70,6 +70,7 @@ class UrlResolver {
     if (uri == null) return null;
     final scheme = uri.scheme.toLowerCase();
     if (scheme != 'http' && scheme != 'https') return null;
+    if (!uri.hasAuthority || uri.host.isEmpty) return null;
     return uri;
   }
 }

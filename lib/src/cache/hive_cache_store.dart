@@ -40,10 +40,10 @@ class HiveCacheStore implements CacheStore {
     String keyPrefix = 'metalink:',
     Duration defaultTtl = const Duration(hours: 4),
     bool closeBoxOnClose = false,
-  })  : _box = box,
-        _keyPrefix = keyPrefix,
-        _defaultTtlMs = defaultTtl.inMilliseconds,
-        _closeBoxOnClose = closeBoxOnClose;
+  }) : _box = box,
+       _keyPrefix = keyPrefix,
+       _defaultTtlMs = defaultTtl.inMilliseconds,
+       _closeBoxOnClose = closeBoxOnClose;
 
   final Box<String> _box;
   final String _keyPrefix;
@@ -132,15 +132,9 @@ class HiveCacheStore implements CacheStore {
 
       final entry = CacheEntry.fromJson(Map<String, dynamic>.from(decoded));
 
-      // Apply default TTL to legacy entries that lack a valid TTL.
-      final normalizedEntry = entry.ttlMs <= 0
-          ? CacheEntry(
-              kind: entry.kind,
-              createdAtMs: entry.createdAtMs,
-              ttlMs: _defaultTtlMs,
-              payload: entry.payload,
-            )
-          : entry;
+      final normalizedEntry = entry.resolveStoreDefault(
+        Duration(milliseconds: _defaultTtlMs),
+      );
 
       if (normalizedEntry.isExpired()) {
         await _safeDelete(k);
@@ -151,11 +145,7 @@ class HiveCacheStore implements CacheStore {
     } catch (e, st) {
       // Best-effort cleanup so unreadable entries do not cause repeated failures.
       await _safeDelete(k);
-      return CacheReadResult(
-        entry: null,
-        error: e,
-        stackTrace: st,
-      );
+      return CacheReadResult(entry: null, error: e, stackTrace: st);
     }
   }
 
@@ -170,14 +160,9 @@ class HiveCacheStore implements CacheStore {
 
     final k = _normalizeKey(key);
 
-    final normalizedEntry = entry.ttlMs <= 0
-        ? CacheEntry(
-            kind: entry.kind,
-            createdAtMs: entry.createdAtMs,
-            ttlMs: _defaultTtlMs,
-            payload: entry.payload,
-          )
-        : entry;
+    final normalizedEntry = entry.resolveStoreDefault(
+      Duration(milliseconds: _defaultTtlMs),
+    );
 
     // If entry is already expired, remove any existing value and treat as a no-op write.
     if (normalizedEntry.isExpired()) {
@@ -190,11 +175,7 @@ class HiveCacheStore implements CacheStore {
       await _box.put(k, raw);
       return const CacheWriteResult(ok: true);
     } catch (e, st) {
-      return CacheWriteResult(
-        ok: false,
-        error: e,
-        stackTrace: st,
-      );
+      return CacheWriteResult(ok: false, error: e, stackTrace: st);
     }
   }
 
@@ -275,15 +256,9 @@ class HiveCacheStore implements CacheStore {
           }
 
           final entry = CacheEntry.fromJson(Map<String, dynamic>.from(decoded));
-          final ttlMs = entry.ttlMs <= 0 ? _defaultTtlMs : entry.ttlMs;
-          final normalizedEntry = entry.ttlMs <= 0
-              ? CacheEntry(
-                  kind: entry.kind,
-                  createdAtMs: entry.createdAtMs,
-                  ttlMs: ttlMs,
-                  payload: entry.payload,
-                )
-              : entry;
+          final normalizedEntry = entry.resolveStoreDefault(
+            Duration(milliseconds: _defaultTtlMs),
+          );
 
           if (normalizedEntry.isExpired(nowMs: now)) {
             keysToDelete.add(key);
@@ -302,7 +277,11 @@ class HiveCacheStore implements CacheStore {
       return CachePurgeResult(ok: true, purged: purged);
     } catch (e, st) {
       return CachePurgeResult(
-          ok: false, purged: purged, error: e, stackTrace: st);
+        ok: false,
+        purged: purged,
+        error: e,
+        stackTrace: st,
+      );
     }
   }
 

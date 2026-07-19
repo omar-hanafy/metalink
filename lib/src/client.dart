@@ -20,6 +20,9 @@ import 'package:metalink/src/model/errors.dart';
 import 'package:metalink/src/model/link_metadata.dart';
 import 'package:metalink/src/model/raw_metadata.dart';
 import 'package:metalink/src/model/url_optimization.dart';
+import 'package:metalink/src/network/request_engine.dart';
+import 'package:metalink/src/network/request_context.dart';
+import 'package:metalink/src/network/request_policy.dart';
 import 'package:metalink/src/options.dart';
 import 'package:metalink/src/result.dart';
 import 'package:metalink/src/util/url_normalizer.dart';
@@ -36,7 +39,7 @@ import 'package:metalink/src/util/url_normalizer.dart';
 ///
 /// ### Resource Management
 /// * The client owns its internal HTTP client unless you inject one via [httpClient].
-/// * Always call [close] when done to release network connections and cache resources.
+/// * Always await [dispose] when done to release network connections and cache resources.
 /// * Using a `try/finally` block ensures cleanup even if extraction fails.
 ///
 /// ### Example
@@ -52,7 +55,7 @@ import 'package:metalink/src/util/url_normalizer.dart';
 ///   final result = await client.extract('https://flutter.dev');
 ///   print(result.metadata.title);
 /// } finally {
-///   client.close();
+///   await client.dispose();
 /// }
 /// ```
 ///
@@ -65,7 +68,10 @@ class MetaLinkClient {
   ///
   /// ### Parameters
   /// * [httpClient] - An optional pre-configured HTTP client. If provided,
-  ///   the client will **not** be closed when [close] is called.
+  ///   the client will **not** be closed when [dispose] is called.
+  /// * [httpClientCapabilities] - A truthful capability description for an
+  ///   injected [httpClient]. Unknown capabilities fail closed when the
+  ///   selected request policy requires inspectable redirect hops.
   /// * [fetcher] - An optional custom [Fetcher] implementation. If provided,
   ///   it takes precedence over [httpClient].
   /// * [cacheStore] - An optional cache store. If `null` and caching is enabled,
@@ -74,22 +80,30 @@ class MetaLinkClient {
   /// * [logSink] - An optional callback for receiving log messages.
   MetaLinkClient({
     http.Client? httpClient,
+    FetcherCapabilities? httpClientCapabilities,
     Fetcher? fetcher,
     CacheStore? cacheStore,
     this.options = const MetaLinkClientOptions(),
     MetaLinkLogSink? logSink,
-  })  : _logSink = logSink,
-        _fetcher = fetcher ??
-            HttpFetcher(
-              client: httpClient ?? http.Client(),
-              logSink: logSink,
-            ),
-        _ownsFetcher = fetcher == null,
-        _cacheStore = cacheStore ??
-            (options.cache.enabled
-                ? MemoryCacheStore(defaultTtl: options.cache.ttl)
-                : null),
-        _ownsCacheStore = cacheStore == null && options.cache.enabled {
+  }) : assert(
+         httpClient != null || httpClientCapabilities == null,
+         'httpClientCapabilities requires an injected httpClient',
+       ),
+       _logSink = logSink,
+       _fetcher =
+           fetcher ??
+           HttpFetcher(
+             client: httpClient,
+             capabilities: httpClient == null ? null : httpClientCapabilities,
+             logSink: logSink,
+           ),
+       _ownsFetcher = fetcher == null,
+       _cacheStore =
+           cacheStore ??
+           (options.cache.enabled
+               ? MemoryCacheStore(defaultTtl: options.cache.ttl)
+               : null),
+       _ownsCacheStore = cacheStore == null && options.cache.enabled {
     _htmlSnippetFetcher = HtmlSnippetFetcher(fetcher: _fetcher);
     _redirectResolver = RedirectResolver(fetcher: _fetcher);
 
@@ -123,6 +137,9 @@ class MetaLinkClient {
   late final ExtractPipeline _pipeline;
 
   bool _closed = false;
+  Future<void>? _disposeFuture;
+  final Map<String, Future<ExtractionResult<LinkMetadata>>> _inFlight = {};
+  final Set<Future<void>> _activeOperations = <Future<void>>{};
 
   /// Extracts metadata from a single URL.
   ///
@@ -136,9 +153,9 @@ class MetaLinkClient {
   ///
   /// ### Parameters
   /// * [url] - The URL to extract metadata from. Must not be empty.
-  /// * [fetchOptions] - Overrides [options.fetch] for this request.
-  /// * [extractOptions] - Overrides [options.extract] for this request.
-  /// * [cacheOptions] - Overrides [options.cache] for this request.
+  /// * [fetchOptions] - Overrides [MetaLinkClientOptions.fetch] for this request.
+  /// * [extractOptions] - Overrides [MetaLinkClientOptions.extract] for this request.
+  /// * [cacheOptions] - Overrides [MetaLinkClientOptions.cache] for this request.
   /// * [skipCache] - If `true`, bypasses the cache for this request only.
   ///
   /// ### Returns
@@ -160,7 +177,88 @@ class MetaLinkClient {
     FetchOptions? fetchOptions,
     ExtractOptions? extractOptions,
     CacheOptions? cacheOptions,
+    RequestContext? requestContext,
     bool skipCache = false,
+  }) async {
+    final trimmed = url.trim();
+    if (trimmed.isEmpty) {
+      throw ArgumentError.value(url, 'url', 'URL must not be empty');
+    }
+
+    if (_closed) {
+      return _closedExtractionResult(Duration.zero);
+    }
+
+    final fOpt = fetchOptions ?? options.fetch;
+    final eOpt = extractOptions ?? options.extract;
+    final cOpt = cacheOptions ?? options.cache;
+    final parsed = UrlNormalizer.parseLoose(trimmed);
+
+    // Invalid inputs still flow through the normal result builder. They are not
+    // coalesced because no stable HTTP request identity exists for them.
+    if (parsed == null) {
+      return _extractOnce(
+        url,
+        fetchOptions: fOpt,
+        extractOptions: eOpt,
+        cacheOptions: cOpt,
+        requestContext: requestContext,
+        skipCache: skipCache,
+      );
+    }
+
+    // A caller-owned context carries its own cancellation and deadline. Do not
+    // coalesce it with another caller whose lifetime may differ.
+    if (requestContext != null) {
+      return _trackOperation(
+        _extractOnce(
+          url,
+          fetchOptions: fOpt,
+          extractOptions: eOpt,
+          cacheOptions: cOpt,
+          requestContext: requestContext,
+          skipCache: skipCache,
+        ),
+      );
+    }
+
+    final inFlightKey = _inFlightSignature(
+      originalUrl: parsed,
+      cacheKeyUrl: UrlNormalizer.normalizeForCacheKey(parsed),
+      fetchOptions: fOpt,
+      extractOptions: eOpt,
+      cacheOptions: cOpt,
+      skipCache: skipCache,
+    );
+    final existing = _inFlight[inFlightKey];
+    if (existing != null) return existing;
+
+    final future = _extractOnce(
+      url,
+      fetchOptions: fOpt,
+      extractOptions: eOpt,
+      cacheOptions: cOpt,
+      requestContext: null,
+      skipCache: skipCache,
+    );
+    _inFlight[inFlightKey] = future;
+
+    try {
+      return await future;
+    } finally {
+      if (identical(_inFlight[inFlightKey], future)) {
+        _inFlight.remove(inFlightKey);
+      }
+    }
+  }
+
+  Future<ExtractionResult<LinkMetadata>> _extractOnce(
+    String url, {
+    required FetchOptions fetchOptions,
+    required ExtractOptions extractOptions,
+    required CacheOptions cacheOptions,
+    required RequestContext? requestContext,
+    required bool skipCache,
   }) async {
     final totalSw = Stopwatch()..start();
 
@@ -174,9 +272,9 @@ class MetaLinkClient {
       return _closedExtractionResult(totalSw.elapsed);
     }
 
-    final fOpt = fetchOptions ?? options.fetch;
-    final eOpt = extractOptions ?? options.extract;
-    final cOpt = cacheOptions ?? options.cache;
+    final fOpt = fetchOptions;
+    final eOpt = extractOptions;
+    final cOpt = cacheOptions;
 
     final warnings = <MetaLinkWarning>[];
     final errors = <MetaLinkError>[];
@@ -212,6 +310,11 @@ class MetaLinkClient {
     final originalUrl = originalParsed;
     final requestUrl = UrlNormalizer.normalizeForRequest(originalUrl);
     final cacheKeyUrl = UrlNormalizer.normalizeForCacheKey(originalUrl);
+    final networkContext = RequestContext.forOperation(
+      totalTimeout: fOpt.totalTimeout,
+      parent: requestContext,
+    );
+
     final cacheKey = CacheKeyBuilder.buildForString(
       _cacheKeySignature(
         cacheKeyUrl: cacheKeyUrl,
@@ -234,7 +337,46 @@ class MetaLinkClient {
     }
 
     if (cacheEnabled) {
-      final read = await _safeCacheRead(_cacheStore!, cacheKey);
+      final lifetimeFailure = _currentRequestLifetimeFailure(
+        context: networkContext,
+        requestUrl: requestUrl,
+      );
+      if (lifetimeFailure != null) {
+        totalSw.stop();
+        return _requestFailureExtractionResult(
+          originalUrl: originalUrl,
+          requestUrl: requestUrl,
+          totalTime: totalSw.elapsed,
+          failure: lifetimeFailure,
+          warnings: warnings,
+        );
+      }
+
+      CacheReadResult read;
+      try {
+        read = await _raceWithRequestLifetime(
+          _safeCacheRead(_cacheStore, cacheKey),
+          context: networkContext,
+          requestUrl: requestUrl,
+        );
+      } catch (error, stackTrace) {
+        if (error is! TimeoutException &&
+            error is! FetchCancellationException) {
+          rethrow;
+        }
+        totalSw.stop();
+        return _requestFailureExtractionResult(
+          originalUrl: originalUrl,
+          requestUrl: requestUrl,
+          totalTime: totalSw.elapsed,
+          failure: _requestLifetimeFailureFromException(
+            error: error,
+            stackTrace: stackTrace,
+            requestUrl: requestUrl,
+          ),
+          warnings: warnings,
+        );
+      }
       if (read.isError) {
         warnings.add(
           MetaLinkWarning(
@@ -249,20 +391,14 @@ class MetaLinkClient {
         final nowMs = DateTime.now().millisecondsSinceEpoch;
 
         // Honor the stricter TTL to avoid extending cache lifetime beyond policy.
-        final storedExpiry = entry.createdAtMs + entry.ttlMs;
         final configuredExpiry = entry.createdAtMs + cOpt.ttl.inMilliseconds;
-        final effectiveExpiry =
-            cOpt.ttl.inMilliseconds > 0 && configuredExpiry < storedExpiry
-                ? configuredExpiry
-                : storedExpiry;
+        final expiredByStoredPolicy = entry.isExpired(nowMs: nowMs);
+        final expiredByRequestPolicy =
+            cOpt.ttl > Duration.zero && nowMs > configuredExpiry;
 
-        if (nowMs > effectiveExpiry) {
+        if (expiredByStoredPolicy || expiredByRequestPolicy) {
           // Best-effort cleanup so cache expiry does not block the success path.
-          try {
-            unawaited(_cacheStore!.delete(cacheKey));
-          } catch (_) {
-            // Swallow cleanup errors so reads remain non-blocking.
-          }
+          unawaited(_deleteCacheEntryBestEffort(_cacheStore, cacheKey));
         } else if (entry.kind == cOpt.payloadKind) {
           final fromCache = _tryBuildResultFromCacheEntry(
             entry: entry,
@@ -271,21 +407,43 @@ class MetaLinkClient {
           );
 
           if (fromCache != null) {
+            final policyFailure = await _validateInitialRequestPolicy(
+              policy: fOpt.requestPolicy,
+              requestUrl: requestUrl,
+              context: networkContext,
+            );
+            if (policyFailure != null) {
+              totalSw.stop();
+              return _requestFailureExtractionResult(
+                originalUrl: originalUrl,
+                requestUrl: requestUrl,
+                totalTime: totalSw.elapsed,
+                failure: policyFailure,
+                warnings: warnings,
+              );
+            }
             totalSw.stop();
+            final cachedDiagnostics = ExtractionDiagnostics(
+              cacheHit: fromCache.diagnostics.cacheHit,
+              totalTime: totalSw.elapsed,
+              fetch: fromCache.diagnostics.fetch,
+              fieldProvenance: fromCache.diagnostics.fieldProvenance,
+              provenanceAvailable: fromCache.diagnostics.provenanceAvailable,
+              itemProvenance: fromCache.diagnostics.itemProvenance,
+              candidateDecisions: fromCache.diagnostics.candidateDecisions,
+            );
             return ExtractionResult<LinkMetadata>(
               metadata: fromCache.metadata,
-              diagnostics: fromCache.diagnostics,
+              diagnostics: cachedDiagnostics,
               raw: fromCache.raw,
               warnings: [...warnings, ...fromCache.warnings],
               errors: fromCache.errors,
+              status: fromCache.status,
+              completeness: fromCache.completeness,
             );
           } else {
             // Cached payload corrupt or incompatible; attempt delete and continue.
-            try {
-              unawaited(_cacheStore!.delete(cacheKey));
-            } catch (_) {
-              // Swallow delete failures so cache issues do not abort extraction.
-            }
+            unawaited(_deleteCacheEntryBestEffort(_cacheStore, cacheKey));
           }
         }
       }
@@ -295,6 +453,7 @@ class MetaLinkClient {
     final fetched = await _htmlSnippetFetcher.fetch(
       requestUrl,
       options: fOpt,
+      context: networkContext,
     );
 
     final page = _copyHtmlFetchResultWithOriginal(
@@ -367,7 +526,8 @@ class MetaLinkClient {
 
     final contentType = _headerValue(page.headers, 'content-type');
     final contentTypeLower = contentType?.toLowerCase();
-    final isHtml = contentTypeLower == null ||
+    final isHtml =
+        contentTypeLower == null ||
         contentTypeLower.contains('text/html') ||
         contentTypeLower.contains('application/xhtml');
 
@@ -446,6 +606,7 @@ class MetaLinkClient {
         fetcher: _fetcher,
         fetchOptions: fOpt,
         extractOptions: eOpt,
+        requestContext: networkContext,
       );
     } catch (e, st) {
       totalSw.stop();
@@ -487,7 +648,14 @@ class MetaLinkClient {
     }
 
     // Cache write is best-effort so extraction success is not blocked by storage.
-    if (cacheEnabled && errors.isEmpty) {
+    // A failed remote enrichment may be transient or deadline-dependent. Do
+    // not let that degraded result poison a later request that can complete.
+    final remoteEnrichmentFailed = warnings.any(
+      (warning) =>
+          warning.code == MetaLinkWarningCode.oembedFailed ||
+          warning.code == MetaLinkWarningCode.manifestFailed,
+    );
+    if (cacheEnabled && errors.isEmpty && !remoteEnrichmentFailed) {
       final entry = CacheEntry(
         kind: cOpt.payloadKind,
         createdAtMs: DateTime.now().millisecondsSinceEpoch,
@@ -501,14 +669,27 @@ class MetaLinkClient {
                 .zero, // replaced below; payload not required to include timing
             fetch: fetchDiag,
             fieldProvenance: pipelineOutput.fieldProvenance,
+            itemProvenance: pipelineOutput.itemProvenance,
+            candidateDecisions: pipelineOutput.candidateDecisions,
           ),
           raw: pipelineOutput.raw,
           warnings: warnings,
           errors: errors,
+          status: ExtractionResult.inferStatus(
+            errors: errors,
+            warnings: warnings,
+          ),
+          completeness: null,
         ),
       );
 
-      final write = await _safeCacheWrite(_cacheStore!, cacheKey, entry);
+      final write = await _safeCacheWriteWithinLifetime(
+        _cacheStore,
+        cacheKey,
+        entry,
+        context: networkContext,
+        requestUrl: requestUrl,
+      );
       if (!write.ok) {
         warnings.add(
           MetaLinkWarning(
@@ -528,6 +709,8 @@ class MetaLinkClient {
       totalTime: totalSw.elapsed,
       fetch: fetchDiag,
       fieldProvenance: pipelineOutput.fieldProvenance,
+      itemProvenance: pipelineOutput.itemProvenance,
+      candidateDecisions: pipelineOutput.candidateDecisions,
     );
 
     return ExtractionResult<LinkMetadata>(
@@ -536,6 +719,7 @@ class MetaLinkClient {
       raw: pipelineOutput.raw,
       warnings: warnings,
       errors: errors,
+      status: ExtractionResult.inferStatus(errors: errors, warnings: warnings),
     );
   }
 
@@ -546,9 +730,9 @@ class MetaLinkClient {
   ///
   /// ### Parameters
   /// * [urls] - The list of URLs to extract metadata from.
-  /// * [fetchOptions] - Overrides [options.fetch] for all requests.
-  /// * [extractOptions] - Overrides [options.extract] for all requests.
-  /// * [cacheOptions] - Overrides [options.cache] for all requests.
+  /// * [fetchOptions] - Overrides [MetaLinkClientOptions.fetch] for all requests.
+  /// * [extractOptions] - Overrides [MetaLinkClientOptions.extract] for all requests.
+  /// * [cacheOptions] - Overrides [MetaLinkClientOptions.cache] for all requests.
   /// * [skipCache] - If `true`, bypasses the cache for all requests.
   /// * [concurrency] - Maximum number of URLs processed simultaneously.
   ///   Defaults to `4`. Must be at least `1`.
@@ -565,6 +749,7 @@ class MetaLinkClient {
     FetchOptions? fetchOptions,
     ExtractOptions? extractOptions,
     CacheOptions? cacheOptions,
+    RequestContext? requestContext,
     bool skipCache = false,
     int concurrency = 4,
   }) async {
@@ -594,6 +779,7 @@ class MetaLinkClient {
             fetchOptions: fetchOptions,
             extractOptions: extractOptions,
             cacheOptions: cacheOptions,
+            requestContext: requestContext,
             skipCache: skipCache,
           );
         } on ArgumentError catch (e, st) {
@@ -678,7 +864,8 @@ class MetaLinkClient {
   ///
   /// ### Parameters
   /// * [url] - The URL to resolve. Must not be empty.
-  /// * [fetchOptions] - Overrides [options.fetch] for this request.
+  /// * [fetchOptions] - Overrides [MetaLinkClientOptions.fetch] for this request.
+  /// * [requestContext] - Optional caller-owned deadline or cancellation signal.
   ///
   /// ### Returns
   /// A [UrlOptimizationResult] containing:
@@ -692,6 +879,21 @@ class MetaLinkClient {
   Future<UrlOptimizationResult> optimizeUrl(
     String url, {
     FetchOptions? fetchOptions,
+    RequestContext? requestContext,
+  }) {
+    return _trackOperation(
+      _optimizeUrlOnce(
+        url,
+        fetchOptions: fetchOptions,
+        requestContext: requestContext,
+      ),
+    );
+  }
+
+  Future<UrlOptimizationResult> _optimizeUrlOnce(
+    String url, {
+    FetchOptions? fetchOptions,
+    RequestContext? requestContext,
   }) async {
     final totalSw = Stopwatch()..start();
 
@@ -735,6 +937,7 @@ class MetaLinkClient {
     final resolved = await _redirectResolver.resolve(
       requestUrl,
       options: fOpt,
+      context: requestContext,
     );
 
     totalSw.stop();
@@ -763,31 +966,39 @@ class MetaLinkClient {
     );
   }
 
-  /// Releases all resources held by this client.
+  /// Releases all resources held by this client and waits for owned resources.
   ///
-  /// After calling [close], any subsequent calls to [extract], [extractBatch],
-  /// or [optimizeUrl] will return error results without performing network requests.
-  ///
-  /// ### Behavior
-  /// * Closes the internal HTTP client (unless one was injected via constructor).
-  /// * Closes the cache store (unless one was injected via constructor).
-  /// * This method is idempotent - calling it multiple times has no additional effect.
-  ///
-  /// ### Best Practice
-  /// Always call [close] in a `finally` block to ensure resources are released:
-  /// ```dart
-  /// final client = MetaLinkClient();
-  /// try {
-  ///   await client.extract('https://example.com');
-  /// } finally {
-  ///   client.close();
-  /// }
-  /// ```
-  void close() {
-    if (_closed) return;
-    _closed = true;
+  /// Active extractions are allowed to finish before owned transports and cache
+  /// stores are closed. New work is rejected as soon as disposal begins.
+  Future<void> dispose() {
+    final existing = _disposeFuture;
+    if (existing != null) return existing;
 
-    // Close only resources we own so injected clients remain caller-controlled.
+    _closed = true;
+    final future = _disposeOwnedResources();
+    _disposeFuture = future;
+    return future;
+  }
+
+  Future<void> _disposeOwnedResources() async {
+    final active = <Future<void>>[
+      for (final operation in _inFlight.values)
+        operation.then<void>((_) {}, onError: (Object _, StackTrace _) {}),
+      ..._activeOperations,
+    ];
+    if (active.isNotEmpty) {
+      try {
+        await Future.wait(active);
+      } catch (e, st) {
+        _log(
+          MetaLinkLogLevel.warning,
+          'An active extraction failed while the client was disposing.',
+          error: e,
+          stackTrace: st,
+        );
+      }
+    }
+
     if (_ownsFetcher) {
       try {
         _fetcher.close();
@@ -803,16 +1014,59 @@ class MetaLinkClient {
 
     if (_ownsCacheStore && _cacheStore != null) {
       try {
-        unawaited(
-          _cacheStore!.close().catchError((_) {}),
+        await _cacheStore.close();
+      } catch (e, st) {
+        _log(
+          MetaLinkLogLevel.warning,
+          'Cache store close failed (ignored).',
+          error: e,
+          stackTrace: st,
         );
-      } catch (_) {
-        // Swallow close errors so shutdown does not crash callers.
       }
     }
   }
 
+  /// Starts releasing resources without waiting for asynchronous cleanup.
+  ///
+  /// Prefer [dispose], which gives callers deterministic completion. This
+  /// compatibility method will be removed in a future major release.
+  ///
+  /// After calling [close], any subsequent calls to [extract], [extractBatch],
+  /// or [optimizeUrl] will return error results without performing network requests.
+  ///
+  /// ### Behavior
+  /// * Closes the internal HTTP client (unless one was injected via constructor).
+  /// * Closes the cache store (unless one was injected via constructor).
+  /// * This method is idempotent - calling it multiple times has no additional effect.
+  ///
+  /// ### Best Practice
+  /// Always await [dispose] in a `finally` block to ensure resources are released:
+  /// ```dart
+  /// final client = MetaLinkClient();
+  /// try {
+  ///   await client.extract('https://example.com');
+  /// } finally {
+  ///   await client.dispose();
+  /// }
+  /// ```
+  @Deprecated('Use and await dispose() instead. Will be removed in 3.0.0.')
+  void close() => unawaited(dispose());
+
   // Private helpers keep error handling and caching logic centralized.
+
+  Future<T> _trackOperation<T>(Future<T> operation) {
+    final completion = operation.then<void>(
+      (_) {},
+      onError: (Object _, StackTrace _) {},
+    );
+    _activeOperations.add(completion);
+    unawaited(
+      completion.whenComplete(() {
+        _activeOperations.remove(completion);
+      }),
+    );
+    return operation;
+  }
 
   void _log(
     MetaLinkLogLevel level,
@@ -840,14 +1094,191 @@ class MetaLinkClient {
     }
   }
 
+  Future<RequestFailure?> _validateInitialRequestPolicy({
+    required RequestPolicy policy,
+    required Uri requestUrl,
+    required RequestContext context,
+  }) async {
+    final lifetimeFailure = _currentRequestLifetimeFailure(
+      context: context,
+      requestUrl: requestUrl,
+    );
+    if (lifetimeFailure != null) return lifetimeFailure;
+
+    try {
+      final decision = await _raceWithRequestLifetime(
+        policy.validateTarget(
+          RequestTarget(
+            uri: requestUrl,
+            purpose: RequestPurpose.document,
+            stage: RequestTargetStage.initial,
+            redirectCount: 0,
+          ),
+        ),
+        context: context,
+        requestUrl: requestUrl,
+      );
+      if (decision.allowed) return null;
+      return RequestFailure(
+        code: RequestFailureCode.policyRejected,
+        message: decision.reason ?? 'Request target rejected by policy.',
+        uri: requestUrl,
+      );
+    } catch (e, st) {
+      if (e is TimeoutException) {
+        return RequestFailure(
+          code: RequestFailureCode.timeout,
+          message: 'The complete request deadline elapsed.',
+          uri: requestUrl,
+          cause: e,
+          stackTrace: st,
+        );
+      }
+      if (e is FetchCancellationException) {
+        return RequestFailure(
+          code: RequestFailureCode.cancelled,
+          message: 'The request was cancelled.',
+          uri: requestUrl,
+          cause: e,
+          stackTrace: st,
+        );
+      }
+      _log(
+        MetaLinkLogLevel.warning,
+        'Initial request policy evaluation failed closed.',
+        error: e,
+        stackTrace: st,
+        context: <String, Object?>{'url': requestUrl.toString()},
+      );
+      return RequestFailure(
+        code: RequestFailureCode.policyRejected,
+        message: 'Request policy evaluation failed.',
+        uri: requestUrl,
+        cause: e,
+        stackTrace: st,
+      );
+    }
+  }
+
+  Future<T> _raceWithRequestLifetime<T>(
+    Future<T> operation, {
+    required RequestContext context,
+    required Uri requestUrl,
+  }) async {
+    final races = <Future<T>>[operation];
+    Timer? deadlineTimer;
+    final remaining = context.remaining;
+    if (remaining != null) {
+      final deadline = Completer<T>();
+      deadlineTimer = Timer(
+        remaining,
+        () => deadline.completeError(
+          TimeoutException('Complete request deadline elapsed'),
+        ),
+      );
+      races.add(deadline.future);
+    }
+
+    final cancellation = context.cancellationSignal;
+    if (cancellation != null) {
+      final cancelled = Completer<T>();
+      cancellation
+          .then<void>(
+            (_) =>
+                cancelled.completeError(FetchCancellationException(requestUrl)),
+            onError: (Object _, StackTrace _) {
+              cancelled.completeError(FetchCancellationException(requestUrl));
+            },
+          )
+          .ignore();
+      races.add(cancelled.future);
+    }
+
+    try {
+      return await Future.any<T>(races);
+    } finally {
+      deadlineTimer?.cancel();
+    }
+  }
+
+  RequestFailure? _currentRequestLifetimeFailure({
+    required RequestContext context,
+    required Uri requestUrl,
+  }) {
+    if (context.isCancelled) {
+      return RequestFailure(
+        code: RequestFailureCode.cancelled,
+        message: 'The request was cancelled.',
+        uri: requestUrl,
+      );
+    }
+    if (context.isExpired) {
+      return RequestFailure(
+        code: RequestFailureCode.timeout,
+        message: 'The complete request deadline elapsed.',
+        uri: requestUrl,
+      );
+    }
+    return null;
+  }
+
+  RequestFailure _requestLifetimeFailureFromException({
+    required Object error,
+    required StackTrace stackTrace,
+    required Uri requestUrl,
+  }) {
+    if (error is FetchCancellationException) {
+      return RequestFailure(
+        code: RequestFailureCode.cancelled,
+        message: 'The request was cancelled.',
+        uri: requestUrl,
+        cause: error,
+        stackTrace: stackTrace,
+      );
+    }
+    return RequestFailure(
+      code: RequestFailureCode.timeout,
+      message: 'The complete request deadline elapsed.',
+      uri: requestUrl,
+      cause: error,
+      stackTrace: stackTrace,
+    );
+  }
+
+  ExtractionResult<LinkMetadata> _requestFailureExtractionResult({
+    required Uri originalUrl,
+    required Uri requestUrl,
+    required Duration totalTime,
+    required RequestFailure failure,
+    required List<MetaLinkWarning> warnings,
+  }) {
+    return ExtractionResult<LinkMetadata>(
+      metadata: _minimalMetadata(
+        originalUrl: originalUrl,
+        resolvedUrl: requestUrl,
+      ),
+      diagnostics: ExtractionDiagnostics(
+        cacheHit: false,
+        totalTime: totalTime,
+        fetch: null,
+        fieldProvenance: const <MetaField, FieldProvenance>{},
+      ),
+      warnings: warnings,
+      errors: <MetaLinkError>[
+        _mapFetchFailureToError(
+          error: failure,
+          stackTrace: failure.stackTrace,
+          uri: requestUrl,
+        ),
+      ],
+    );
+  }
+
   LinkMetadata _minimalMetadata({
     required Uri originalUrl,
     required Uri resolvedUrl,
   }) {
-    return LinkMetadata(
-      originalUrl: originalUrl,
-      resolvedUrl: resolvedUrl,
-    );
+    return LinkMetadata(originalUrl: originalUrl, resolvedUrl: resolvedUrl);
   }
 
   ExtractionResult<LinkMetadata> _closedExtractionResult(Duration totalTime) {
@@ -937,6 +1368,7 @@ class MetaLinkClient {
     required CacheOptions cacheOptions,
   }) {
     final parts = <String>[
+      'engine=2.1',
       cacheKeyUrl.toString(),
       cacheOptions.payloadKind.name,
       _fetchOptionsSignature(fetchOptions),
@@ -964,15 +1396,39 @@ class MetaLinkClient {
 
   String _fetchOptionsSignature(FetchOptions options) {
     return <String>[
-      't${options.timeout.inMilliseconds}',
-      options.userAgent == null ? 'ua=' : 'ua=${options.userAgent}',
+      _lengthPrefixed('ua', options.userAgent ?? ''),
       options.followRedirects ? 'fr1' : 'fr0',
       'mr${options.maxRedirects}',
       'mb${options.maxBytes}',
       options.stopAfterHead ? 'sh1' : 'sh0',
-      options.proxyUrl == null ? 'px=' : 'px=${options.proxyUrl}',
-      'h=${_headersSignature(options.headers)}',
+      _lengthPrefixed('px', options.proxyUrl ?? ''),
+      _lengthPrefixed('policy', options.requestPolicy.cacheIdentity),
+      _lengthPrefixed('h', _headersSignature(options.headers)),
     ].join(',');
+  }
+
+  String _inFlightSignature({
+    required Uri originalUrl,
+    required Uri cacheKeyUrl,
+    required FetchOptions fetchOptions,
+    required ExtractOptions extractOptions,
+    required CacheOptions cacheOptions,
+    required bool skipCache,
+  }) {
+    return <String>[
+      _lengthPrefixed('original', originalUrl.toString()),
+      _cacheKeySignature(
+        cacheKeyUrl: cacheKeyUrl,
+        fetchOptions: fetchOptions,
+        extractOptions: extractOptions,
+        cacheOptions: cacheOptions,
+      ),
+      'attemptTimeout=${fetchOptions.timeout.inMicroseconds}',
+      'totalTimeout=${fetchOptions.totalTimeout.inMicroseconds}',
+      'cacheEnabled=${cacheOptions.enabled}',
+      'cacheTtl=${cacheOptions.ttl.inMicroseconds}',
+      'skipCache=$skipCache',
+    ].join('|');
   }
 
   String _headersSignature(Map<String, String> headers) {
@@ -981,7 +1437,18 @@ class MetaLinkClient {
         .map((e) => MapEntry(e.key.toLowerCase(), e.value))
         .toList(growable: false);
     entries.sort((a, b) => a.key.compareTo(b.key));
-    return entries.map((e) => '${e.key}=${e.value}').join('&');
+    return entries
+        .map(
+          (entry) => <String>[
+            _lengthPrefixed('k', entry.key),
+            _lengthPrefixed('v', entry.value),
+          ].join(),
+        )
+        .join();
+  }
+
+  String _lengthPrefixed(String label, String value) {
+    return '$label${value.length}:$value';
   }
 
   MetaLinkError _mapFetchFailureToError({
@@ -990,6 +1457,44 @@ class MetaLinkClient {
     Uri? uri,
     int? statusCode,
   }) {
+    if (error is RequestFailure) {
+      final code = switch (error.code) {
+        RequestFailureCode.invalidTarget => MetaLinkErrorCode.invalidUrl,
+        RequestFailureCode.policyRejected ||
+        RequestFailureCode.unsupportedCapability => MetaLinkErrorCode.network,
+        RequestFailureCode.redirectLimit ||
+        RequestFailureCode.redirectLoop ||
+        RequestFailureCode.invalidRedirect => MetaLinkErrorCode.network,
+        RequestFailureCode.timeout => MetaLinkErrorCode.timeout,
+        RequestFailureCode.cancelled => MetaLinkErrorCode.network,
+        RequestFailureCode.proxyConfiguration ||
+        RequestFailureCode.transport => MetaLinkErrorCode.network,
+      };
+      final reason = switch (error.code) {
+        RequestFailureCode.policyRejected ||
+        RequestFailureCode.unsupportedCapability =>
+          MetaLinkErrorReason.policyRejected,
+        RequestFailureCode.redirectLimit ||
+        RequestFailureCode.redirectLoop ||
+        RequestFailureCode.invalidRedirect =>
+          MetaLinkErrorReason.redirectsExceeded,
+        RequestFailureCode.cancelled => MetaLinkErrorReason.cancelled,
+        RequestFailureCode.invalidTarget ||
+        RequestFailureCode.timeout ||
+        RequestFailureCode.proxyConfiguration ||
+        RequestFailureCode.transport => null,
+      };
+      return MetaLinkError(
+        code: code,
+        reason: reason,
+        message: error.message,
+        uri: error.uri,
+        statusCode: statusCode,
+        cause: error.cause ?? error,
+        stackTrace: error.stackTrace ?? stackTrace,
+      );
+    }
+
     if (error is TimeoutException) {
       return MetaLinkError(
         code: MetaLinkErrorCode.timeout,
@@ -1031,6 +1536,47 @@ class MetaLinkClient {
     }
   }
 
+  Future<CacheWriteResult> _safeCacheWriteWithinLifetime(
+    CacheStore store,
+    String key,
+    CacheEntry entry, {
+    required RequestContext context,
+    required Uri requestUrl,
+  }) async {
+    try {
+      return await _raceWithRequestLifetime(
+        _safeCacheWrite(store, key, entry),
+        context: context,
+        requestUrl: requestUrl,
+      );
+    } catch (error, stackTrace) {
+      return CacheWriteResult(ok: false, error: error, stackTrace: stackTrace);
+    }
+  }
+
+  Future<void> _deleteCacheEntryBestEffort(CacheStore store, String key) async {
+    try {
+      final result = await store.delete(key);
+      if (!result.ok) {
+        _log(
+          MetaLinkLogLevel.warning,
+          'Cache entry cleanup failed (ignored).',
+          error: result.error,
+          stackTrace: result.stackTrace,
+          context: <String, Object?>{'cacheKey': key},
+        );
+      }
+    } catch (error, stackTrace) {
+      _log(
+        MetaLinkLogLevel.warning,
+        'Cache entry cleanup threw (ignored).',
+        error: error,
+        stackTrace: stackTrace,
+        context: <String, Object?>{'cacheKey': key},
+      );
+    }
+  }
+
   Map<String, dynamic> _buildCachePayload({
     required CachePayloadKind kind,
     required LinkMetadata metadata,
@@ -1038,6 +1584,8 @@ class MetaLinkClient {
     required RawMetadata? raw,
     required List<MetaLinkWarning> warnings,
     required List<MetaLinkError> errors,
+    required ExtractionStatus status,
+    required double? completeness,
   }) {
     switch (kind) {
       case CachePayloadKind.linkMetadata:
@@ -1050,6 +1598,8 @@ class MetaLinkClient {
           'raw': raw?.toJson(),
           'warnings': warnings.map((w) => w.toJson()).toList(),
           'errors': errors.map((e) => e.toJson()).toList(),
+          'status': status.name,
+          'completeness': completeness,
         };
     }
   }
@@ -1065,8 +1615,10 @@ class MetaLinkClient {
           Map<String, dynamic>.from(entry.payload),
         );
 
-        final patched =
-            _cloneMetadataWithOriginal(cached, requestedOriginalUrl);
+        final patched = _cloneMetadataWithOriginal(
+          cached,
+          requestedOriginalUrl,
+        );
 
         return ExtractionResult<LinkMetadata>(
           metadata: patched,
@@ -1074,6 +1626,7 @@ class MetaLinkClient {
             cacheHit: true,
             totalTime: totalTime,
             fetch: null,
+            provenanceAvailable: false,
             fieldProvenance: const <MetaField, FieldProvenance>{},
           ),
           raw: null,
@@ -1086,8 +1639,9 @@ class MetaLinkClient {
         final payload = Map<String, dynamic>.from(entry.payload);
 
         final metaJson = Map<String, dynamic>.from(payload['metadata'] as Map);
-        final diagJson =
-            Map<String, dynamic>.from(payload['diagnostics'] as Map);
+        final diagJson = Map<String, dynamic>.from(
+          payload['diagnostics'] as Map,
+        );
 
         final cachedMeta = LinkMetadata.fromJson(metaJson);
         final cachedDiag = ExtractionDiagnostics.fromJson(diagJson);
@@ -1123,8 +1677,20 @@ class MetaLinkClient {
           }
         }
 
-        final patchedMeta =
-            _cloneMetadataWithOriginal(cachedMeta, requestedOriginalUrl);
+        final patchedMeta = _cloneMetadataWithOriginal(
+          cachedMeta,
+          requestedOriginalUrl,
+        );
+        final statusName = payload['status'];
+        final cachedStatus = statusName is String
+            ? ExtractionStatus.values
+                  .where((status) => status.name == statusName)
+                  .firstOrNull
+            : null;
+        final completenessValue = payload['completeness'];
+        final cachedCompleteness = completenessValue is num
+            ? completenessValue.toDouble()
+            : null;
 
         return ExtractionResult<LinkMetadata>(
           metadata: patchedMeta,
@@ -1132,11 +1698,16 @@ class MetaLinkClient {
             cacheHit: true,
             totalTime: totalTime,
             fetch: cachedDiag.fetch,
+            provenanceAvailable: cachedDiag.provenanceAvailable,
             fieldProvenance: cachedDiag.fieldProvenance,
+            itemProvenance: cachedDiag.itemProvenance,
+            candidateDecisions: cachedDiag.candidateDecisions,
           ),
           raw: raw,
           warnings: cachedWarnings,
           errors: cachedErrors,
+          status: cachedStatus,
+          completeness: cachedCompleteness,
         );
       }
 

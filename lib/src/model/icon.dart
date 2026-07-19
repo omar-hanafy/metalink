@@ -19,12 +19,7 @@ import 'package:convert_object/convert_object.dart';
 /// ```
 class IconCandidate {
   /// Creates an [IconCandidate].
-  const IconCandidate({
-    required this.url,
-    this.sizes,
-    this.type,
-    this.rel,
-  });
+  const IconCandidate({required this.url, this.sizes, this.type, this.rel});
 
   /// The absolute URL of the icon image.
   final Uri url;

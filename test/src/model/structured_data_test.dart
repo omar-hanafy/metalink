@@ -3,10 +3,12 @@ import 'package:test/test.dart';
 
 void main() {
   test('StructuredDataGraph toJson and fromJson', () {
-    const graph = StructuredDataGraph(nodes: [
-      {'@type': 'Article'},
-      {'@type': 'Person'}
-    ]);
+    const graph = StructuredDataGraph(
+      nodes: [
+        {'@type': 'Article'},
+        {'@type': 'Person'},
+      ],
+    );
     final decoded = StructuredDataGraph.fromJson(graph.toJson());
     expect(decoded.nodes.length, 2);
     expect(decoded.nodes.first['@type'], 'Article');
@@ -17,8 +19,8 @@ void main() {
       'nodes': [
         {'@type': 'Article'},
         {},
-        'bad'
-      ]
+        'bad',
+      ],
     });
     expect(decoded.nodes.length, 1);
   });

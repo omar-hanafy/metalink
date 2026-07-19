@@ -34,7 +34,8 @@ class StandardMetaExtractor implements HtmlMetadataExtractorStage {
     }
 
     // Use standard meta description as a summary fallback.
-    final desc = _metaContent(doc, name: 'description') ??
+    final desc =
+        _metaContent(doc, name: 'description') ??
         _metaContent(doc, property: 'description');
     if (desc != null) {
       context.addDescription(
@@ -46,7 +47,8 @@ class StandardMetaExtractor implements HtmlMetadataExtractorStage {
     }
 
     // Use application-name tags as site name hints when present.
-    final appName = _metaContent(doc, name: 'application-name') ??
+    final appName =
+        _metaContent(doc, name: 'application-name') ??
         _metaContent(doc, name: 'apple-mobile-web-app-title');
     if (appName != null) {
       context.addSiteName(
@@ -68,7 +70,8 @@ class StandardMetaExtractor implements HtmlMetadataExtractorStage {
       );
     }
 
-    final contentLanguage = _metaContent(doc, httpEquiv: 'content-language') ??
+    final contentLanguage =
+        _metaContent(doc, httpEquiv: 'content-language') ??
         _metaContent(doc, name: 'language');
     if (contentLanguage != null) {
       context.addLocale(
@@ -102,7 +105,8 @@ class StandardMetaExtractor implements HtmlMetadataExtractorStage {
     }
 
     // Use author meta tags for attribution when other sources are absent.
-    final author = _metaContent(doc, name: 'author') ??
+    final author =
+        _metaContent(doc, name: 'author') ??
         _metaContent(doc, property: 'author');
     if (author != null) {
       context.addAuthor(
@@ -114,7 +118,8 @@ class StandardMetaExtractor implements HtmlMetadataExtractorStage {
     }
 
     // Parse common publish and modify tags to populate timeline fields.
-    final publishedRaw = _metaContent(doc, name: 'pubdate') ??
+    final publishedRaw =
+        _metaContent(doc, name: 'pubdate') ??
         _metaContent(doc, name: 'publish-date') ??
         _metaContent(doc, name: 'publication_date') ??
         _metaContent(doc, name: 'date') ??
@@ -131,7 +136,8 @@ class StandardMetaExtractor implements HtmlMetadataExtractorStage {
       );
     }
 
-    final modifiedRaw = _metaContent(doc, name: 'last-modified') ??
+    final modifiedRaw =
+        _metaContent(doc, name: 'last-modified') ??
         _metaContent(doc, name: 'modified') ??
         _metaContent(doc, name: 'dateModified') ??
         _metaContent(doc, itemProp: 'dateModified') ??
@@ -215,8 +221,9 @@ class StandardMetaExtractor implements HtmlMetadataExtractorStage {
       return dt;
     }
 
-    final withT =
-        s.contains(' ') && !s.contains('T') ? s.replaceFirst(' ', 'T') : s;
+    final withT = s.contains(' ') && !s.contains('T')
+        ? s.replaceFirst(' ', 'T')
+        : s;
     return DateTime.tryParse(withT);
   }
 }

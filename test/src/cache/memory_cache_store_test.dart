@@ -25,6 +25,35 @@ void main() {
     expect(read.entry!.ttlMs, 1000);
   });
 
+  test('write and read snapshots nested mutable payloads', () async {
+    final store = MemoryCacheStore();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final nested = <dynamic>[
+      <String, dynamic>{
+        'keywords': <dynamic>['original'],
+      },
+    ];
+    final source = entry(
+      createdAtMs: now,
+      ttlMs: 1000,
+      payload: <String, dynamic>{'nested': nested},
+    );
+
+    expect((await store.write('snapshot', source)).ok, isTrue);
+    (nested.single as Map<String, dynamic>)['keywords'] = <dynamic>['changed'];
+
+    final first = (await store.read('snapshot')).entry!;
+    final firstNested = first.payload['nested']! as List<dynamic>;
+    final firstMap = firstNested.single as Map<String, dynamic>;
+    expect(firstMap['keywords'], <dynamic>['original']);
+    (firstMap['keywords']! as List<dynamic>).add('mutated read');
+
+    final second = (await store.read('snapshot')).entry!;
+    final secondNested = second.payload['nested']! as List<dynamic>;
+    final secondMap = secondNested.single as Map<String, dynamic>;
+    expect(secondMap['keywords'], <dynamic>['original']);
+  });
+
   test('keyPrefix is applied consistently', () async {
     final store = MemoryCacheStore(keyPrefix: 'p:');
     final now = DateTime.now().millisecondsSinceEpoch;
@@ -40,6 +69,21 @@ void main() {
     final read = await store.read('k1');
     expect(read.entry, isNotNull);
     expect(read.entry!.ttlMs, 2000);
+  });
+
+  test('explicit never-expiring entry does not use default TTL', () async {
+    final store = MemoryCacheStore(defaultTtl: const Duration(milliseconds: 1));
+    final entry = CacheEntry.withLifetime(
+      kind: CachePayloadKind.linkMetadata,
+      createdAtMs: 1,
+      lifetime: const CacheLifetime.neverExpires(),
+      payload: const {},
+    );
+    await store.write('never', entry);
+
+    final read = await store.read('never');
+    expect(read.entry, isNotNull);
+    expect(read.entry!.lifetime.kind, CacheLifetimeKind.neverExpires);
   });
 
   test('expired entries are removed', () async {

@@ -1,4 +1,5 @@
 import 'dart:collection';
+import 'dart:convert';
 
 import 'package:metalink/src/cache/cache_store.dart';
 
@@ -32,9 +33,9 @@ class MemoryCacheStore implements CacheStore {
     String keyPrefix = 'metalink:',
     Duration defaultTtl = const Duration(hours: 4),
     int maxEntries = 500,
-  })  : _keyPrefix = keyPrefix,
-        _defaultTtlMs = defaultTtl.inMilliseconds,
-        _maxEntries = maxEntries < 0 ? 0 : maxEntries;
+  }) : _keyPrefix = keyPrefix,
+       _defaultTtlMs = defaultTtl.inMilliseconds,
+       _maxEntries = maxEntries < 0 ? 0 : maxEntries;
 
   final String _keyPrefix;
   final int _defaultTtlMs;
@@ -58,14 +59,9 @@ class MemoryCacheStore implements CacheStore {
       return const CacheReadResult(entry: null);
     }
 
-    final entry = stored.ttlMs <= 0
-        ? CacheEntry(
-            kind: stored.kind,
-            createdAtMs: stored.createdAtMs,
-            ttlMs: _defaultTtlMs,
-            payload: stored.payload,
-          )
-        : stored;
+    final entry = stored.resolveStoreDefault(
+      Duration(milliseconds: _defaultTtlMs),
+    );
 
     if (entry.isExpired()) {
       _entries.remove(k);
@@ -76,7 +72,12 @@ class MemoryCacheStore implements CacheStore {
     _entries.remove(k);
     _entries[k] = entry;
 
-    return CacheReadResult(entry: entry);
+    try {
+      return CacheReadResult(entry: _snapshot(entry));
+    } catch (e, st) {
+      _entries.remove(k);
+      return CacheReadResult(entry: null, error: e, stackTrace: st);
+    }
   }
 
   @override
@@ -90,15 +91,14 @@ class MemoryCacheStore implements CacheStore {
 
     final k = _normalizeKey(key);
 
-    // If caller supplied ttlMs=0, fall back to the default TTL to avoid immediate expiry.
-    final normalizedEntry = entry.ttlMs <= 0
-        ? CacheEntry(
-            kind: entry.kind,
-            createdAtMs: entry.createdAtMs,
-            ttlMs: _defaultTtlMs,
-            payload: entry.payload,
-          )
-        : entry;
+    late final CacheEntry normalizedEntry;
+    try {
+      normalizedEntry = _snapshot(
+        entry.resolveStoreDefault(Duration(milliseconds: _defaultTtlMs)),
+      );
+    } catch (e, st) {
+      return CacheWriteResult(ok: false, error: e, stackTrace: st);
+    }
 
     // Skip storing expired entries so the cache stays clean.
     if (normalizedEntry.isExpired()) {
@@ -189,5 +189,13 @@ class MemoryCacheStore implements CacheStore {
       final oldestKey = _entries.keys.first;
       _entries.remove(oldestKey);
     }
+  }
+
+  CacheEntry _snapshot(CacheEntry entry) {
+    final decoded = jsonDecode(jsonEncode(entry.toJson()));
+    if (decoded is! Map) {
+      throw const FormatException('Cache entry did not encode as an object.');
+    }
+    return CacheEntry.fromJson(Map<String, dynamic>.from(decoded));
   }
 }

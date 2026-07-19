@@ -31,7 +31,8 @@ void main() {
   });
 
   test('maps og:type website to homepage for root url', () async {
-    const html = '<meta property="og:type" content="website">'
+    const html =
+        '<meta property="og:type" content="website">'
         '<meta property="og:title" content="Home">';
     final metadata = await runPipeline(
       html: html,
@@ -42,7 +43,8 @@ void main() {
   });
 
   test('parses epoch timestamps', () async {
-    const html = '<meta property="article:published_time" content="1700000000">'
+    const html =
+        '<meta property="article:published_time" content="1700000000">'
         '<meta property="og:updated_time" content="1700000000000">';
     final metadata = await runPipeline(
       html: html,
@@ -50,5 +52,24 @@ void main() {
     );
     expect(metadata.publishedAt, isNotNull);
     expect(metadata.modifiedAt, isNotNull);
+  });
+
+  test('keeps og:image:secure_url attached to its root image', () async {
+    const html =
+        '<meta property="og:image" content="http://example.com/image.png">'
+        '<meta property="og:image:secure_url" content="https://example.com/image.png">'
+        '<meta property="og:image:width" content="1200">'
+        '<meta property="og:image:height" content="630">'
+        '<meta property="og:image:alt" content="Preview">';
+    final metadata = await runPipeline(
+      html: html,
+      stages: const [OpenGraphExtractor()],
+    );
+
+    expect(metadata.images, hasLength(1));
+    expect(metadata.images.single.url.scheme, 'https');
+    expect(metadata.images.single.width, 1200);
+    expect(metadata.images.single.height, 630);
+    expect(metadata.images.single.alt, 'Preview');
   });
 }

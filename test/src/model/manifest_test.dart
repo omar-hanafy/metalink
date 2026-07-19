@@ -25,9 +25,7 @@ void main() {
       display: 'standalone',
       backgroundColor: '#fff',
       themeColor: '#000',
-      icons: [
-        ManifestIcon(src: Uri.parse('https://example.com/icon.png')),
-      ],
+      icons: [ManifestIcon(src: Uri.parse('https://example.com/icon.png'))],
     );
     final decoded = WebAppManifestData.fromJson(data.toJson());
     expect(decoded.manifestUrl.toString(), 'https://example.com/manifest.json');
@@ -42,8 +40,8 @@ void main() {
       'manifestUrl': 'https://example.com/manifest.json',
       'icons': [
         {'src': 'https://example.com/icon.png'},
-        'bad'
-      ]
+        'bad',
+      ],
     });
     expect(decoded.icons.length, 1);
   });

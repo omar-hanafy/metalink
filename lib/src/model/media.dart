@@ -131,10 +131,7 @@ class VideoCandidate {
 /// * [mimeType] - Audio format (e.g., `audio/mpeg`), if declared.
 class AudioCandidate {
   /// Creates an [AudioCandidate].
-  const AudioCandidate({
-    required this.url,
-    this.mimeType,
-  });
+  const AudioCandidate({required this.url, this.mimeType});
 
   /// The absolute URL of the audio file.
   final Uri url;
@@ -143,10 +140,7 @@ class AudioCandidate {
   final String? mimeType;
 
   Map<String, dynamic> toJson() {
-    return <String, dynamic>{
-      'url': url.toString(),
-      'mimeType': mimeType,
-    };
+    return <String, dynamic>{'url': url.toString(), 'mimeType': mimeType};
   }
 
   factory AudioCandidate.fromJson(Map<String, dynamic> json) {

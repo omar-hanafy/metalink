@@ -1,0 +1,22 @@
+name: metalink_showcase
+description: A custom Flutter link preview built directly with MetaLink.
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: '>=3.11.0 <4.0.0'
+  flutter: '>=3.29.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  metalink:
+    path: ../..
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true

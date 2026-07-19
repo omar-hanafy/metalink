@@ -19,9 +19,7 @@ void main() {
   });
 
   test('RawMetadata normalizes meta keys to lowercase', () {
-    final doc = html_parser.parse(
-      '<meta NAME="Description" content="Desc">',
-    );
+    final doc = html_parser.parse('<meta NAME="Description" content="Desc">');
     final raw = RawMetadata.fromDocument(doc);
     expect(raw.meta.containsKey('description'), isTrue);
   });
@@ -29,7 +27,7 @@ void main() {
   test('RawMetadata toJson and fromJson', () {
     const raw = RawMetadata(
       meta: {
-        'k': ['v']
+        'k': ['v'],
       },
       links: [RawLinkTag(rel: 'icon', href: '/x')],
     );

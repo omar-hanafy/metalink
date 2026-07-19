@@ -22,10 +22,7 @@ class CacheKeyBuilder {
   /// ### Parameters
   /// * [url] - The URI to hash.
   /// * [prefix] - A prefix to prepend to the hash. Defaults to `metalink:`.
-  static String buildForUrl(
-    Uri url, {
-    String prefix = 'metalink:',
-  }) {
+  static String buildForUrl(Uri url, {String prefix = 'metalink:'}) {
     final canonical = url.toString();
     final digest = sha256.convert(utf8.encode(canonical)).toString();
     return '$prefix$digest';
@@ -40,10 +37,7 @@ class CacheKeyBuilder {
   /// ### Parameters
   /// * [value] - The string to hash.
   /// * [prefix] - A prefix to prepend to the hash. Defaults to `metalink:`.
-  static String buildForString(
-    String value, {
-    String prefix = 'metalink:',
-  }) {
+  static String buildForString(String value, {String prefix = 'metalink:'}) {
     final digest = sha256.convert(utf8.encode(value)).toString();
     return '$prefix$digest';
   }

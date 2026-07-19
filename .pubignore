@@ -1,0 +1,11 @@
+# Local and internal artifacts that are useful in the repository but should
+# not be included in the pub.dev archive.
+**/.DS_Store
+/build/
+/coverage/
+/doc/api/
+/docs_guide.md
+/examples/
+/metalink_cache.hive
+/metalink_cache.lock
+/pubspec.lock

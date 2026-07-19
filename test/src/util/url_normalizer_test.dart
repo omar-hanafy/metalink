@@ -78,10 +78,14 @@ void main() {
     test('normalizeForRequest drops default ports', () {
       final httpUrl = Uri.parse('http://example.com:80/path');
       final httpsUrl = Uri.parse('https://example.com:443/path');
-      expect(UrlNormalizer.normalizeForRequest(httpUrl).toString(),
-          'http://example.com/path');
-      expect(UrlNormalizer.normalizeForRequest(httpsUrl).toString(),
-          'https://example.com/path');
+      expect(
+        UrlNormalizer.normalizeForRequest(httpUrl).toString(),
+        'http://example.com/path',
+      );
+      expect(
+        UrlNormalizer.normalizeForRequest(httpsUrl).toString(),
+        'https://example.com/path',
+      );
     });
 
     test('normalizeForRequest keeps non-default port', () {
@@ -103,22 +107,28 @@ void main() {
         target,
         'https://proxy.test?u={urlEncoded}',
       );
-      expect(proxyEncoded.toString(),
-          'https://proxy.test?u=https%3A%2F%2Fexample.com%2Fpath%3Fx%3D1');
+      expect(
+        proxyEncoded.toString(),
+        'https://proxy.test?u=https%3A%2F%2Fexample.com%2Fpath%3Fx%3D1',
+      );
 
       final proxyRaw = UrlNormalizer.applyProxy(
         target,
         'https://proxy.test?u={url}',
       );
-      expect(proxyRaw.toString(),
-          'https://proxy.test?u=https://example.com/path?x=1');
+      expect(
+        proxyRaw.toString(),
+        'https://proxy.test?u=https://example.com/path?x=1',
+      );
 
       final proxyPrefix = UrlNormalizer.applyProxy(
         target,
         'https://proxy.test/',
       );
-      expect(proxyPrefix.toString(),
-          'https://proxy.test/https://example.com/path?x=1');
+      expect(
+        proxyPrefix.toString(),
+        'https://proxy.test/https://example.com/path?x=1',
+      );
     });
   });
 }

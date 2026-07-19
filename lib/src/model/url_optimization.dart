@@ -62,7 +62,7 @@ class RedirectHop {
 ///
 /// ### Example
 /// ```dart
-/// final result = await client.optimizeUrl(Uri.parse('https://bit.ly/xyz'));
+/// final result = await client.optimizeUrl('https://bit.ly/xyz');
 /// if (result.isOk) {
 ///   print('Final URL: ${result.finalUrl}');
 ///   print('Redirects: ${result.redirects.length}');
