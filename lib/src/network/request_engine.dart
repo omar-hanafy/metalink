@@ -460,6 +460,14 @@ class RequestEngine {
     final head = await _head(logicalUrl, requestUrl, options, context, headers);
     if (strategy == RequestMethodStrategy.head) return head;
 
+    // A timeout or caller cancellation ends the logical request. Treating
+    // either as an ordinary HEAD failure can start a fallback GET in the tiny
+    // interval between the deadline timer firing and the context clock
+    // observing that same deadline.
+    if (head.error case TimeoutException() || FetchCancellationException()) {
+      return head;
+    }
+
     final fallback = strategy == RequestMethodStrategy.headWithGetFallback
         ? head.error != null || head.statusCode == 405 || head.statusCode == 501
         : _shouldFallbackFromDocumentHead(head);
