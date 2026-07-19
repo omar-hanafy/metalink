@@ -25,8 +25,10 @@ class LinkRelExtractor implements HtmlMetadataExtractorStage {
       if (hrefRaw == null || hrefRaw.isEmpty) continue;
 
       final relLower = relRaw.toLowerCase();
-      final tokens =
-          relLower.split(RegExp(r'\s+')).where((t) => t.isNotEmpty).toSet();
+      final tokens = relLower
+          .split(RegExp(r'\s+'))
+          .where((t) => t.isNotEmpty)
+          .toSet();
 
       // Prefer rel=canonical to stabilize the final URL when pages publish alternates.
       if (extractLinkRels && tokens.contains('canonical')) {
@@ -59,7 +61,8 @@ class LinkRelExtractor implements HtmlMetadataExtractorStage {
       // Discover oEmbed endpoints so enrichment can fetch provider data later.
       final typeAttr = (el.attributes['type'] ?? el.attributes['TYPE'])?.trim();
       final typeLower = typeAttr?.toLowerCase();
-      final isOembed = enableOembed &&
+      final isOembed =
+          enableOembed &&
           tokens.contains('alternate') &&
           typeLower != null &&
           typeLower.contains('oembed');
@@ -91,8 +94,8 @@ class LinkRelExtractor implements HtmlMetadataExtractorStage {
         final key = uri.toString();
         if (!seenIconUrls.add(key)) continue;
 
-        final sizes =
-            (el.attributes['sizes'] ?? el.attributes['SIZES'])?.trim();
+        final sizes = (el.attributes['sizes'] ?? el.attributes['SIZES'])
+            ?.trim();
         final type = (el.attributes['type'] ?? el.attributes['TYPE'])?.trim();
 
         context.addIconUri(

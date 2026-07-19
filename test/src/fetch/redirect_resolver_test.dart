@@ -20,6 +20,10 @@ void main() {
     );
     expect(result.finalUrl, url);
     expect(result.redirects, isEmpty);
+    expect(
+      fetcher.requests.single.headers?['user-agent'],
+      'MetaLink (+https://github.com/omar-hanafy/metalink)',
+    );
   });
 
   test('resolve follows redirects with head', () async {

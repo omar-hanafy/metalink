@@ -19,10 +19,7 @@ enum OEmbedFormat {
 /// * [format] - The response format ([OEmbedFormat.json] or [OEmbedFormat.xml]).
 class OEmbedEndpoint {
   /// Creates an [OEmbedEndpoint].
-  const OEmbedEndpoint({
-    required this.url,
-    required this.format,
-  });
+  const OEmbedEndpoint({required this.url, required this.format});
 
   /// The oEmbed endpoint URL.
   final Uri url;
@@ -31,10 +28,7 @@ class OEmbedEndpoint {
   final OEmbedFormat format;
 
   Map<String, dynamic> toJson() {
-    return <String, dynamic>{
-      'url': url.toString(),
-      'format': format.name,
-    };
+    return <String, dynamic>{'url': url.toString(), 'format': format.name};
   }
 
   factory OEmbedEndpoint.fromJson(Map<String, dynamic> json) {
@@ -72,7 +66,7 @@ class OEmbedEndpoint {
 ///
 /// See also:
 /// * [OEmbedEndpoint] for the endpoint discovery structure.
-/// * [MetaLinkOptions.fetchOEmbed] to enable/disable oEmbed fetching.
+/// * `ExtractOptions.enableOEmbed` to enable or disable oEmbed fetching.
 class OEmbedData {
   /// Creates an [OEmbedData].
   const OEmbedData({

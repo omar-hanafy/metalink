@@ -29,9 +29,11 @@ void main() {
       manifest: WebAppManifestData(
         manifestUrl: Uri.parse('https://example.com/manifest.json'),
       ),
-      structuredData: const StructuredDataGraph(nodes: [
-        {'@type': 'Article'}
-      ]),
+      structuredData: const StructuredDataGraph(
+        nodes: [
+          {'@type': 'Article'},
+        ],
+      ),
     );
 
     final decoded = LinkMetadata.fromJson(metadata.toJson());
@@ -75,7 +77,7 @@ void main() {
       'resolvedUrl': 'https://example.com',
       'images': [
         {'url': 'https://example.com/img.png'},
-        'bad'
+        'bad',
       ],
     });
     expect(decoded.images.length, 1);

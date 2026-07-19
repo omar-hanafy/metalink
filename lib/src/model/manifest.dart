@@ -15,12 +15,7 @@ import 'package:convert_object/convert_object.dart';
 /// * [WebAppManifestData] for the full manifest structure.
 class ManifestIcon {
   /// Creates a [ManifestIcon].
-  const ManifestIcon({
-    required this.src,
-    this.sizes,
-    this.type,
-    this.purpose,
-  });
+  const ManifestIcon({required this.src, this.sizes, this.type, this.purpose});
 
   /// The absolute URL of the icon image.
   final Uri src;
@@ -76,7 +71,7 @@ class ManifestIcon {
 ///
 /// See also:
 /// * [ManifestIcon] for individual icon entries.
-/// * [MetaLinkOptions.fetchManifest] to enable/disable manifest fetching.
+/// * `ExtractOptions.enableManifest` to enable or disable manifest fetching.
 class WebAppManifestData {
   /// Creates a [WebAppManifestData].
   const WebAppManifestData({

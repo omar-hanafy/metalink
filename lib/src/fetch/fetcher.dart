@@ -1,5 +1,63 @@
 import 'package:metalink/src/options.dart';
 
+/// Describes whether a fetcher can expose redirect responses to MetaLink.
+enum RedirectHandlingCapability {
+  /// Redirect responses are returned without being followed by the transport.
+  inspectable,
+
+  /// The transport cannot return redirect responses for manual processing.
+  unavailable,
+
+  /// The transport's redirect behavior cannot be determined in advance.
+  unknown,
+}
+
+/// Capabilities exposed by an optional [Fetcher] implementation.
+class FetcherCapabilities {
+  /// Creates a capability description.
+  const FetcherCapabilities({
+    required this.supportsAbort,
+    required this.redirectHandling,
+    this.limitation,
+  });
+
+  /// Capabilities assumed for legacy [Fetcher] implementations.
+  ///
+  /// The [Fetcher] contract requires redirects to remain unfollowed, but the
+  /// legacy API has no cancellation signal.
+  const FetcherCapabilities.legacy()
+    : supportsAbort = false,
+      redirectHandling = RedirectHandlingCapability.inspectable,
+      limitation = 'Legacy Fetcher requests cannot be actively aborted.';
+
+  /// Whether a request can be actively cancelled after it starts.
+  final bool supportsAbort;
+
+  /// Whether redirect responses can be inspected one hop at a time.
+  final RedirectHandlingCapability redirectHandling;
+
+  /// A human-readable description of any relevant platform limitation.
+  final String? limitation;
+}
+
+/// Optional interface for fetchers that report transport capabilities.
+abstract interface class CapabilityAwareFetcher {
+  /// Capabilities of this fetcher on the current platform.
+  FetcherCapabilities get capabilities;
+}
+
+/// Error returned when an in-flight fetch is cancelled by its caller.
+class FetchCancellationException implements Exception {
+  /// Creates a cancellation error for [uri].
+  const FetchCancellationException(this.uri);
+
+  /// The request that was cancelled.
+  final Uri uri;
+
+  @override
+  String toString() => 'FetchCancellationException: Request cancelled for $uri';
+}
+
 /// The result of an HTTP fetch operation.
 ///
 /// [FetchResponse] encapsulates the HTTP response including status code,
@@ -69,7 +127,11 @@ class FetchResponse {
 ///
 /// ### Contract
 /// * Methods must not throw; errors are captured in [FetchResponse.error].
-/// * Redirects are **not** followed automatically (callers handle redirects).
+/// * Inspectable transports return redirects without following them.
+/// * A [CapabilityAwareFetcher] with
+///   [RedirectHandlingCapability.unavailable] may follow redirects only when
+///   [FetchOptions.followRedirects] allows it, and must report the final URL in
+///   [FetchResponse.url]. Intermediate hops remain unavailable.
 /// * The [close] method must be called when done to release resources.
 abstract interface class Fetcher {
   /// Performs an HTTP GET request.
@@ -105,4 +167,27 @@ abstract interface class Fetcher {
   ///
   /// After calling [close], the fetcher must not be used.
   void close();
+}
+
+/// Optional extension of [Fetcher] that accepts an active cancellation signal.
+///
+/// Existing [Fetcher] implementations remain source-compatible. Callers should
+/// check for this interface before passing an [abortTrigger].
+abstract interface class AbortableFetcher implements Fetcher {
+  @override
+  Future<FetchResponse> get(
+    Uri url, {
+    required FetchOptions options,
+    Map<String, String>? headers,
+    int? maxBytes,
+    Future<void>? abortTrigger,
+  });
+
+  @override
+  Future<FetchResponse> head(
+    Uri url, {
+    required FetchOptions options,
+    Map<String, String>? headers,
+    Future<void>? abortTrigger,
+  });
 }

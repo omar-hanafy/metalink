@@ -72,10 +72,7 @@ class RawLinkTag {
 /// * [links] - List of all `<link>` tags found in the document.
 class RawMetadata {
   /// Creates a [RawMetadata].
-  const RawMetadata({
-    required this.meta,
-    required this.links,
-  });
+  const RawMetadata({required this.meta, required this.links});
 
   /// Meta tag values keyed by normalized (lowercase) name/property.
   ///
@@ -118,10 +115,7 @@ class RawMetadata {
       );
     }
 
-    return RawMetadata(
-      meta: metaMap,
-      links: linkTags,
-    );
+    return RawMetadata(meta: metaMap, links: linkTags);
   }
 
   Map<String, dynamic> toJson() {

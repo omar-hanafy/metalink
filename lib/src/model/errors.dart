@@ -48,6 +48,23 @@ enum MetaLinkErrorCode {
   unknown,
 }
 
+/// A precise reason attached to an existing broad [MetaLinkErrorCode].
+///
+/// This additive detail preserves exhaustive switches over the v2 error-code
+/// enum while letting callers distinguish cancellation, policy rejection, and
+/// redirect failures.
+enum MetaLinkErrorReason {
+  /// The caller cancelled the request before completion.
+  cancelled,
+
+  /// The configured request policy rejected the target or transport.
+  policyRejected,
+
+  /// Redirect processing exceeded its limit, found a loop, or found an invalid
+  /// destination.
+  redirectsExceeded,
+}
+
 /// Represents a fatal error that prevented metadata extraction.
 ///
 /// [MetaLinkError] provides structured error information including an error
@@ -55,22 +72,22 @@ enum MetaLinkErrorCode {
 /// or HTTP status code.
 ///
 /// ### When to Use
-/// Check [ExtractionResult.error] to determine if extraction failed, then
-/// inspect [code] to categorize the failure.
+/// Check `ExtractionResult.primaryError` to inspect the first failure, or use
+/// `ExtractionResult.errors` when every reported error matters.
 ///
 /// ### Example
 /// ```dart
 /// final result = await MetaLink.extract(url);
-/// if (result.error != null) {
-///   switch (result.error!.code) {
+/// if (result.primaryError != null) {
+///   switch (result.primaryError!.code) {
 ///     case MetaLinkErrorCode.timeout:
 ///       print('Request timed out');
 ///       break;
 ///     case MetaLinkErrorCode.httpStatus:
-///       print('HTTP ${result.error!.statusCode}');
+///       print('HTTP ${result.primaryError!.statusCode}');
 ///       break;
 ///     default:
-///       print(result.error!.message);
+///       print(result.primaryError!.message);
 ///   }
 /// }
 /// ```
@@ -81,6 +98,7 @@ class MetaLinkError {
     required this.message,
     this.uri,
     this.statusCode,
+    this.reason,
     this.cause,
     this.stackTrace,
   });
@@ -97,11 +115,34 @@ class MetaLinkError {
   /// The HTTP status code, if the error is [MetaLinkErrorCode.httpStatus].
   final int? statusCode;
 
+  /// Precise failure reason when [code] alone is intentionally broad.
+  final MetaLinkErrorReason? reason;
+
   /// The underlying exception that caused this error, if any.
   final Object? cause;
 
   /// Stack trace for [cause], if available.
   final StackTrace? stackTrace;
+
+  /// Whether retrying the same operation may succeed without changing input.
+  bool get isRetryable => reason != null
+      ? false
+      : switch (code) {
+          MetaLinkErrorCode.network || MetaLinkErrorCode.timeout => true,
+          MetaLinkErrorCode.httpStatus =>
+            statusCode == 408 ||
+                statusCode == 425 ||
+                statusCode == 429 ||
+                (statusCode != null && statusCode! >= 500),
+          MetaLinkErrorCode.invalidUrl ||
+          MetaLinkErrorCode.nonHtmlContent ||
+          MetaLinkErrorCode.decode ||
+          MetaLinkErrorCode.parse ||
+          MetaLinkErrorCode.oembed ||
+          MetaLinkErrorCode.manifest ||
+          MetaLinkErrorCode.cache ||
+          MetaLinkErrorCode.unknown => false,
+        };
 
   Map<String, dynamic> toJson() {
     return <String, dynamic>{
@@ -109,6 +150,7 @@ class MetaLinkError {
       'message': message,
       'uri': uri?.toString(),
       'statusCode': statusCode,
+      'reason': reason?.name,
       'cause': cause?.toString(),
       'stackTrace': stackTrace?.toString(),
     };
@@ -116,6 +158,12 @@ class MetaLinkError {
 
   factory MetaLinkError.fromJson(Map<String, dynamic> json) {
     final st = json.tryGetString('stackTrace');
+    final reasonRaw = json['reason'];
+    final reason = reasonRaw is String
+        ? MetaLinkErrorReason.values
+              .where((value) => value.name == reasonRaw)
+              .firstOrNull
+        : null;
     return MetaLinkError(
       code: json.getEnum(
         'code',
@@ -125,9 +173,11 @@ class MetaLinkError {
       message: json.getString('message', defaultValue: ''),
       uri: json.tryGetUri('uri'),
       statusCode: json.tryGetInt('statusCode'),
+      reason: reason,
       cause: json['cause'],
-      stackTrace:
-          (st != null && st.isNotEmpty) ? StackTrace.fromString(st) : null,
+      stackTrace: (st != null && st.isNotEmpty)
+          ? StackTrace.fromString(st)
+          : null,
     );
   }
 }

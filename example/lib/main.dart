@@ -1,7 +1,7 @@
 import 'package:metalink/metalink.dart';
 
 void main() async {
-  print('🚀 MetaLink V2 Example\n');
+  print('🚀 MetaLink Example\n');
 
   // 1. Simple Extraction
   print('--- Simple Extraction ---');
@@ -14,7 +14,7 @@ void main() async {
     options: const MetaLinkClientOptions(
       fetch: FetchOptions(
         timeout: Duration(seconds: 10),
-        userAgent: 'MetaLink-Example/2.0',
+        userAgent: 'MetaLink-Example',
       ),
       extract: ExtractOptions(
         extractJsonLd: true,
@@ -43,7 +43,7 @@ void main() async {
       print('Title Source: ${titleProv.source} (Score: ${titleProv.score})');
     }
   } finally {
-    client.close();
+    await client.dispose();
   }
 
   // 3. Batch Processing

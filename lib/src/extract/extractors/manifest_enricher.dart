@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'package:metalink/src/fetch/fetcher.dart';
 import 'package:metalink/src/options.dart';
 import 'package:metalink/src/model/manifest.dart';
+import 'package:metalink/src/network/request_context.dart';
+import 'package:metalink/src/network/request_policy.dart';
 import 'package:metalink/src/util/json_utils.dart';
 
 import 'package:metalink/src/fetch/fetch_utils.dart';
@@ -14,6 +16,7 @@ class ManifestEnricher {
     required Fetcher fetcher,
     required FetchOptions fetchOptions,
     required Uri manifestUrl,
+    RequestContext? requestContext,
   }) async {
     final response = await FetchUtils.getWithRedirects(
       fetcher,
@@ -23,7 +26,11 @@ class ManifestEnricher {
         'accept':
             'application/manifest+json, application/json;q=0.9, */*;q=0.8',
       },
-      maxBytes: 512 * 1024,
+      maxBytes: fetchOptions.maxBytes < _maxManifestBytes
+          ? fetchOptions.maxBytes
+          : _maxManifestBytes,
+      context: requestContext,
+      purpose: RequestPurpose.manifest,
     );
 
     if (response.error != null) return null;
@@ -33,6 +40,7 @@ class ManifestEnricher {
     final text = utf8.decode(response.bodyBytes, allowMalformed: true);
     final obj = JsonUtils.tryDecodeObject(text);
     if (obj == null) return null;
+    final resolvedManifestUrl = response.url;
 
     final name = _asString(obj['name']);
     final shortName = _asString(obj['short_name']);
@@ -41,8 +49,9 @@ class ManifestEnricher {
     final themeColor = _asString(obj['theme_color']);
 
     final startUrlRaw = _asString(obj['start_url']);
-    final startUrl =
-        startUrlRaw == null ? null : _resolveAgainst(manifestUrl, startUrlRaw);
+    final startUrl = startUrlRaw == null
+        ? null
+        : _resolveAgainst(resolvedManifestUrl, startUrlRaw);
 
     final icons = <ManifestIcon>[];
     final iconsRaw = obj['icons'];
@@ -52,7 +61,7 @@ class ManifestEnricher {
         final srcRaw = _asString(item['src']);
         if (srcRaw == null) continue;
 
-        final src = _resolveAgainst(manifestUrl, srcRaw);
+        final src = _resolveAgainst(resolvedManifestUrl, srcRaw);
         if (src == null) continue;
 
         icons.add(
@@ -67,7 +76,7 @@ class ManifestEnricher {
     }
 
     return WebAppManifestData(
-      manifestUrl: manifestUrl,
+      manifestUrl: resolvedManifestUrl,
       name: name,
       shortName: shortName,
       startUrl: startUrl,
@@ -96,3 +105,5 @@ class ManifestEnricher {
     return s.isEmpty ? null : s;
   }
 }
+
+const int _maxManifestBytes = 512 * 1024;

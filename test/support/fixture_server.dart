@@ -55,7 +55,10 @@ class FixtureServer {
 
     if (pathValue == '/blocked') {
       return _respondHtmlStatus(
-          request, 403, '<html><body>Access denied</body></html>');
+        request,
+        403,
+        '<html><body>Access denied</body></html>',
+      );
     }
 
     if (pathValue == '/page/large') {
@@ -74,10 +77,7 @@ class FixtureServer {
     return _respondStatus(request, 404, 'Not Found');
   }
 
-  Future<void> _respondRedirect(
-    HttpRequest request,
-    String location,
-  ) async {
+  Future<void> _respondRedirect(HttpRequest request, String location) async {
     request.response.statusCode = 302;
     request.response.headers.set(HttpHeaders.locationHeader, location);
     request.response.headers.set(HttpHeaders.cacheControlHeader, 'no-store');
@@ -126,11 +126,7 @@ class FixtureServer {
     }
 
     final bytes = await file.readAsBytes();
-    return _respondBytes(
-      request,
-      bytes,
-      contentType: fixture.contentType,
-    );
+    return _respondBytes(request, bytes, contentType: fixture.contentType);
   }
 
   Future<void> _respondAsset(HttpRequest request, String pathValue) async {
@@ -245,10 +241,7 @@ const Map<String, _FixtureRoute> _routes = {
     'html/manifest_only.html',
     'text/html; charset=utf-8',
   ),
-  '/page/no-charset': _FixtureRoute(
-    'html/no_charset.html',
-    'text/html',
-  ),
+  '/page/no-charset': _FixtureRoute('html/no_charset.html', 'text/html'),
   '/page/standard-meta': _FixtureRoute(
     'html/standard_meta.html',
     'text/html; charset=utf-8',

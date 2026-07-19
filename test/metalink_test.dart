@@ -17,10 +17,7 @@ void main() {
       ),
     );
 
-    final result = await MetaLink.extract(
-      url.toString(),
-      cacheStore: cache,
-    );
+    final result = await MetaLink.extract(url.toString(), cacheStore: cache);
     expect(result.metadata.title, 'Cached');
     expect(result.diagnostics.cacheHit, isTrue);
   });
@@ -72,10 +69,8 @@ void main() {
 }
 
 class _StubCacheStore implements CacheStore {
-  _StubCacheStore({
-    this.entry,
-    List<CacheEntry>? queue,
-  }) : _queue = queue ?? <CacheEntry>[];
+  _StubCacheStore({this.entry, List<CacheEntry>? queue})
+    : _queue = queue ?? <CacheEntry>[];
 
   final CacheEntry? entry;
   final List<CacheEntry> _queue;

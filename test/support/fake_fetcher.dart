@@ -23,9 +23,8 @@ class FetchRequest {
 typedef FetchHandler = FutureOr<FetchResponse> Function(FetchRequest request);
 
 class FakeFetcher implements Fetcher {
-  FakeFetcher({
-    FetchHandler? onMissing,
-  }) : _onMissing = onMissing ?? _defaultMissingHandler;
+  FakeFetcher({FetchHandler? onMissing})
+    : _onMissing = onMissing ?? _defaultMissingHandler;
 
   final FetchHandler _onMissing;
   final List<FetchRequest> requests = <FetchRequest>[];
@@ -154,7 +153,8 @@ class FakeFetcher implements Fetcher {
       truncated: false,
       duration: Duration.zero,
       error: StateError(
-          'No handler registered for ${request.method} ${request.url}'),
+        'No handler registered for ${request.method} ${request.url}',
+      ),
     );
   }
 

@@ -19,18 +19,31 @@ void main() {
     expect(resolver.resolve(base, 'data:text/plain,hi'), isNull);
   });
 
+  test('resolve rejects hostless HTTP and HTTPS URLs', () {
+    expect(resolver.resolve(base, 'http:relative'), isNull);
+    expect(resolver.resolve(base, 'https:/missing-host'), isNull);
+  });
+
   test('resolve accepts absolute and relative urls', () {
-    expect(resolver.resolve(base, 'https://example.com/a')!.toString(),
-        'https://example.com/a');
     expect(
-        resolver.resolve(base, '/rel')!.toString(), 'https://example.com/rel');
-    expect(resolver.resolve(base, 'child')!.toString(),
-        'https://example.com/base/child');
+      resolver.resolve(base, 'https://example.com/a')!.toString(),
+      'https://example.com/a',
+    );
+    expect(
+      resolver.resolve(base, '/rel')!.toString(),
+      'https://example.com/rel',
+    );
+    expect(
+      resolver.resolve(base, 'child')!.toString(),
+      'https://example.com/base/child',
+    );
   });
 
   test('resolve handles protocol-relative', () {
-    expect(resolver.resolve(base, '//example.com/x')!.toString(),
-        'https://example.com/x');
+    expect(
+      resolver.resolve(base, '//example.com/x')!.toString(),
+      'https://example.com/x',
+    );
   });
 
   test('resolveAll filters invalid entries', () {

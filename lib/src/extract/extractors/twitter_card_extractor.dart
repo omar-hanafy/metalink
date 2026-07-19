@@ -14,12 +14,12 @@ class TwitterCardExtractor implements HtmlMetadataExtractorStage {
       // Twitter tags are usually in "name", but some pages use "property", so check both.
       final byName =
           doc.querySelector('meta[name="$name"]')?.attributes['content'] ??
-              doc.querySelector('meta[name="$name"]')?.attributes['value'];
+          doc.querySelector('meta[name="$name"]')?.attributes['value'];
       if (byName != null && byName.trim().isNotEmpty) return byName.trim();
 
       final byProp =
           doc.querySelector('meta[property="$name"]')?.attributes['content'] ??
-              doc.querySelector('meta[property="$name"]')?.attributes['value'];
+          doc.querySelector('meta[property="$name"]')?.attributes['value'];
       if (byProp != null && byProp.trim().isNotEmpty) return byProp.trim();
 
       return null;

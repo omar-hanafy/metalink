@@ -3,9 +3,12 @@ import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
 
+import 'package:metalink/src/fetch/fetcher.dart';
+import 'package:metalink/src/fetch/http_fetcher_capabilities_io.dart'
+    if (dart.library.js_interop) 'package:metalink/src/fetch/http_fetcher_capabilities_web.dart'
+    as platform_capabilities;
 import 'package:metalink/src/model/diagnostics.dart';
 import 'package:metalink/src/options.dart';
-import 'package:metalink/src/fetch/fetcher.dart';
 
 /// Default [Fetcher] implementation using the `http` package.
 ///
@@ -18,6 +21,13 @@ import 'package:metalink/src/fetch/fetcher.dart';
 /// across requests for better performance. The external client is **not**
 /// closed when [close] is called.
 ///
+/// On browsers, `window.fetch` cannot expose redirect responses. Compatible
+/// policies therefore delegate enabled redirects to the browser and preserve
+/// the final response URL. Intermediate hops, the configured redirect count,
+/// per-hop target validation, and MetaLink's cross-origin header stripping
+/// cannot be observed or enforced. Policies that require inspectable hops are
+/// rejected by the unified request engine before transport.
+///
 /// ### Example
 /// ```dart
 /// final fetcher = HttpFetcher();
@@ -27,25 +37,54 @@ import 'package:metalink/src/fetch/fetcher.dart';
 /// );
 /// fetcher.close();
 /// ```
-class HttpFetcher implements Fetcher {
+class HttpFetcher implements AbortableFetcher, CapabilityAwareFetcher {
   /// Creates an [HttpFetcher].
   ///
   /// ### Parameters
   /// * [client] - Optional pre-configured HTTP client. If provided, it will
   ///   **not** be closed when [close] is called (caller manages lifecycle).
+  /// * [clientFactory] - Optional factory used to create an owned HTTP client.
+  ///   Factory-created clients are closed by [close].
+  /// * [capabilities] - Optional truthful capability description for an
+  ///   injected client or factory. Custom clients default to unknown
+  ///   capabilities when this is omitted.
   /// * [logSink] - Optional callback to receive internal log messages.
   HttpFetcher({
     http.Client? client,
+    http.Client Function()? clientFactory,
+    FetcherCapabilities? capabilities,
     MetaLinkLogSink? logSink,
-  })  : _client = client ?? http.Client(),
-        _ownsClient = client == null,
-        _logSink = logSink;
+  }) : assert(
+         client == null || clientFactory == null,
+         'client and clientFactory cannot both be provided',
+       ),
+       _client = client ?? (clientFactory ?? _createDefaultClient)(),
+       _ownsClient = client == null,
+       _capabilities =
+           capabilities ??
+           (client == null && clientFactory == null
+               ? platform_capabilities.defaultHttpFetcherCapabilities()
+               : const FetcherCapabilities(
+                   supportsAbort: false,
+                   redirectHandling: RedirectHandlingCapability.unknown,
+                   limitation:
+                       'Capabilities of the injected HTTP client are '
+                       'unknown. Pass an explicit capability description when '
+                       'the client guarantees abort and manual redirects.',
+                 )),
+       _logSink = logSink;
+
+  static http.Client _createDefaultClient() => http.Client();
 
   final http.Client _client;
   final bool _ownsClient;
+  final FetcherCapabilities _capabilities;
   final MetaLinkLogSink? _logSink;
 
   bool _closed = false;
+
+  @override
+  FetcherCapabilities get capabilities => _capabilities;
 
   @override
   Future<FetchResponse> get(
@@ -53,10 +92,15 @@ class HttpFetcher implements Fetcher {
     required FetchOptions options,
     Map<String, String>? headers,
     int? maxBytes,
+    Future<void>? abortTrigger,
   }) async {
     final sw = Stopwatch()..start();
+    final abort = _RequestAbortController(
+      url: url,
+      timeout: options.timeout,
+      externalTrigger: abortTrigger,
+    );
 
-    http.StreamedResponse? streamed;
     int? statusCode;
     Map<String, String> responseHeaders = const <String, String>{};
     List<int> body = const <int>[];
@@ -65,29 +109,29 @@ class HttpFetcher implements Fetcher {
     try {
       _throwIfClosed();
 
-      final request = http.Request('GET', url)
-        ..followRedirects = false
-        ..maxRedirects = 0;
+      final followRedirects = _allowsAutomaticRedirects(options);
+      final request =
+          http.AbortableRequest('GET', url, abortTrigger: abort.trigger)
+            ..followRedirects = followRedirects
+            ..maxRedirects = followRedirects ? options.maxRedirects : 0;
 
       request.headers.addAll(_buildRequestHeaders(options, headers));
 
-      streamed = await _client.send(request).timeout(options.timeout);
-      statusCode = streamed.statusCode;
-      responseHeaders = Map<String, String>.from(streamed.headers);
+      final response = await abort.wait(_client.send(request));
+      statusCode = response.statusCode;
+      responseHeaders = Map<String, String>.from(response.headers);
 
-      final remaining = _remainingTimeout(options.timeout, sw.elapsed);
       final limit = maxBytes ?? options.maxBytes;
 
-      final readResult = await _readStreamWithLimit(
-        streamed.stream,
-        limit,
-      ).timeout(remaining);
+      final readResult = await abort.wait(
+        _readStreamWithLimit(response.stream, limit),
+      );
 
       body = readResult.bytes;
       truncated = readResult.truncated;
 
       return FetchResponse(
-        url: url,
+        url: _responseUrl(response, url),
         statusCode: statusCode,
         headers: responseHeaders,
         bodyBytes: body,
@@ -103,6 +147,24 @@ class HttpFetcher implements Fetcher {
         context: {'url': url.toString()},
       );
       // Return partial response so callers can inspect headers even on timeout.
+      return FetchResponse(
+        url: url,
+        statusCode: statusCode,
+        headers: responseHeaders,
+        bodyBytes: body,
+        truncated: truncated,
+        duration: sw.elapsed,
+        error: e,
+        stackTrace: st,
+      );
+    } on FetchCancellationException catch (e, st) {
+      _safeLog(
+        MetaLinkLogLevel.info,
+        'HTTP GET cancelled',
+        error: e,
+        stackTrace: st,
+        context: {'url': url.toString()},
+      );
       return FetchResponse(
         url: url,
         statusCode: statusCode,
@@ -131,6 +193,8 @@ class HttpFetcher implements Fetcher {
         error: e,
         stackTrace: st,
       );
+    } finally {
+      abort.dispose();
     }
   }
 
@@ -139,33 +203,38 @@ class HttpFetcher implements Fetcher {
     Uri url, {
     required FetchOptions options,
     Map<String, String>? headers,
+    Future<void>? abortTrigger,
   }) async {
     final sw = Stopwatch()..start();
+    final abort = _RequestAbortController(
+      url: url,
+      timeout: options.timeout,
+      externalTrigger: abortTrigger,
+    );
 
-    http.StreamedResponse? streamed;
     int? statusCode;
     Map<String, String> responseHeaders = const <String, String>{};
 
     try {
       _throwIfClosed();
 
-      final request = http.Request('HEAD', url)
-        ..followRedirects = false
-        ..maxRedirects = 0;
+      final followRedirects = _allowsAutomaticRedirects(options);
+      final request =
+          http.AbortableRequest('HEAD', url, abortTrigger: abort.trigger)
+            ..followRedirects = followRedirects
+            ..maxRedirects = followRedirects ? options.maxRedirects : 0;
 
       request.headers.addAll(_buildRequestHeaders(options, headers));
 
-      streamed = await _client.send(request).timeout(options.timeout);
-      statusCode = streamed.statusCode;
-      responseHeaders = Map<String, String>.from(streamed.headers);
-
-      final remaining = _remainingTimeout(options.timeout, sw.elapsed);
+      final response = await abort.wait(_client.send(request));
+      statusCode = response.statusCode;
+      responseHeaders = Map<String, String>.from(response.headers);
 
       // HEAD should have no body, so cancel quickly to avoid hanging on drain.
-      await _cancelStream(streamed.stream).timeout(remaining);
+      await abort.wait(_cancelStream(response.stream));
 
       return FetchResponse(
-        url: url,
+        url: _responseUrl(response, url),
         statusCode: statusCode,
         headers: responseHeaders,
         bodyBytes: const <int>[],
@@ -176,6 +245,24 @@ class HttpFetcher implements Fetcher {
       _safeLog(
         MetaLinkLogLevel.warning,
         'HTTP HEAD timeout',
+        error: e,
+        stackTrace: st,
+        context: {'url': url.toString()},
+      );
+      return FetchResponse(
+        url: url,
+        statusCode: statusCode,
+        headers: responseHeaders,
+        bodyBytes: const <int>[],
+        truncated: false,
+        duration: sw.elapsed,
+        error: e,
+        stackTrace: st,
+      );
+    } on FetchCancellationException catch (e, st) {
+      _safeLog(
+        MetaLinkLogLevel.info,
+        'HTTP HEAD cancelled',
         error: e,
         stackTrace: st,
         context: {'url': url.toString()},
@@ -208,6 +295,8 @@ class HttpFetcher implements Fetcher {
         error: e,
         stackTrace: st,
       );
+    } finally {
+      abort.dispose();
     }
   }
 
@@ -228,6 +317,20 @@ class HttpFetcher implements Fetcher {
     if (_closed) {
       throw StateError('HttpFetcher is closed');
     }
+  }
+
+  bool _allowsAutomaticRedirects(FetchOptions options) {
+    return _capabilities.redirectHandling ==
+            RedirectHandlingCapability.unavailable &&
+        options.followRedirects &&
+        options.maxRedirects > 0;
+  }
+
+  static Uri _responseUrl(http.StreamedResponse response, Uri requestUrl) {
+    return switch (response) {
+      http.BaseResponseWithUrl(:final url) => url,
+      _ => requestUrl,
+    };
   }
 
   void _safeLog(
@@ -287,13 +390,62 @@ class HttpFetcher implements Fetcher {
 
     return out;
   }
+}
 
-  Duration _remainingTimeout(Duration total, Duration elapsed) {
-    final remainingMs = total.inMilliseconds - elapsed.inMilliseconds;
-    if (remainingMs <= 0) {
-      throw TimeoutException('Request timed out');
+enum _AbortReason { timeout, cancellation }
+
+class _RequestAbortController {
+  _RequestAbortController({
+    required this.url,
+    required this.timeout,
+    Future<void>? externalTrigger,
+  }) {
+    _timer = Timer(timeout, () => _abort(_AbortReason.timeout));
+    externalTrigger
+        ?.then<void>(
+          (_) => _abort(_AbortReason.cancellation),
+          onError: (Object _, StackTrace _) {
+            _abort(_AbortReason.cancellation);
+          },
+        )
+        .ignore();
+  }
+
+  final Uri url;
+  final Duration timeout;
+  final Completer<void> _trigger = Completer<void>();
+  final Completer<_AbortReason> _reason = Completer<_AbortReason>();
+
+  Timer? _timer;
+  bool _active = true;
+
+  Future<void> get trigger => _trigger.future;
+
+  Future<T> wait<T>(Future<T> operation) {
+    final interrupted = _reason.future.then<T>((reason) {
+      switch (reason) {
+        case _AbortReason.timeout:
+          throw TimeoutException('Request timed out', timeout);
+        case _AbortReason.cancellation:
+          throw FetchCancellationException(url);
+      }
+    });
+    return Future.any<T>(<Future<T>>[operation, interrupted]);
+  }
+
+  void _abort(_AbortReason reason) {
+    if (!_active || _reason.isCompleted) return;
+    _reason.complete(reason);
+    if (!_trigger.isCompleted) {
+      _trigger.complete();
     }
-    return Duration(milliseconds: remainingMs);
+  }
+
+  void dispose() {
+    if (!_active) return;
+    _active = false;
+    _timer?.cancel();
+    _timer = null;
   }
 }
 

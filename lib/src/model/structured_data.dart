@@ -21,9 +21,7 @@ import 'package:convert_object/convert_object.dart';
 /// ```
 class StructuredDataGraph {
   /// Creates a [StructuredDataGraph].
-  const StructuredDataGraph({
-    required this.nodes,
-  });
+  const StructuredDataGraph({required this.nodes});
 
   /// The list of JSON-LD objects found in the document.
   ///
@@ -31,9 +29,7 @@ class StructuredDataGraph {
   final List<Map<String, dynamic>> nodes;
 
   Map<String, dynamic> toJson() {
-    return <String, dynamic>{
-      'nodes': nodes,
-    };
+    return <String, dynamic>{'nodes': nodes};
   }
 
   factory StructuredDataGraph.fromJson(Map<String, dynamic> json) {

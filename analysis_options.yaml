@@ -1,4 +1,4 @@
-# analysis_options.yaml — publishable packages focus
+# analysis_options.yaml - publishable packages focus
 # Conservative defaults + strict import/pubspec hygiene for pub.dev
 
 include: package:lints/recommended.yaml
@@ -42,6 +42,7 @@ analyzer:
     - "lib/**/generated/**"
     - "build/**"
     - ".dart_tool/**"
+    - "examples/**"
 
   # Escalate only the things that matter for publish; keep noise low.
   errors:

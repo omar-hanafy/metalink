@@ -1,12 +1,18 @@
 import 'package:metalink/src/options.dart';
 import 'package:metalink/src/cache/cache_store.dart';
+import 'package:metalink/src/network/request_policy.dart';
 import 'package:test/test.dart';
 
 void main() {
+  test('CacheOptions keeps the compact v2 payload by default', () {
+    expect(const CacheOptions().payloadKind, CachePayloadKind.linkMetadata);
+  });
+
   test('FetchOptions copyWith overrides fields', () {
     const base = FetchOptions();
     final updated = base.copyWith(
       timeout: const Duration(seconds: 1),
+      totalTimeout: const Duration(seconds: 3),
       userAgent: 'agent',
       followRedirects: false,
       maxRedirects: 1,
@@ -14,8 +20,10 @@ void main() {
       stopAfterHead: false,
       proxyUrl: 'https://proxy',
       headers: {'x': 'y'},
+      requestPolicy: RequestPolicy.secure(),
     );
     expect(updated.timeout, const Duration(seconds: 1));
+    expect(updated.totalTimeout, const Duration(seconds: 3));
     expect(updated.userAgent, 'agent');
     expect(updated.followRedirects, isFalse);
     expect(updated.maxRedirects, 1);
@@ -23,6 +31,7 @@ void main() {
     expect(updated.stopAfterHead, isFalse);
     expect(updated.proxyUrl, 'https://proxy');
     expect(updated.headers, {'x': 'y'});
+    expect(updated.requestPolicy.requireInspectableRedirects, isTrue);
   });
 
   test('ExtractOptions copyWith overrides fields', () {

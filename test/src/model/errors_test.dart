@@ -8,6 +8,7 @@ void main() {
       message: 'oops',
       uri: Uri.parse('https://example.com'),
       statusCode: 500,
+      reason: MetaLinkErrorReason.redirectsExceeded,
       cause: StateError('x'),
       stackTrace: StackTrace.fromString('stack'),
     );
@@ -16,6 +17,8 @@ void main() {
     expect(decoded.message, 'oops');
     expect(decoded.uri.toString(), 'https://example.com');
     expect(decoded.statusCode, 500);
+    expect(decoded.reason, MetaLinkErrorReason.redirectsExceeded);
+    expect(decoded.isRetryable, isFalse);
   });
 
   test('MetaLinkWarning toJson and fromJson', () {

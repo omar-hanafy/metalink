@@ -5,6 +5,8 @@ import 'package:xml/xml.dart' as xml;
 import 'package:metalink/src/fetch/fetcher.dart';
 import 'package:metalink/src/options.dart';
 import 'package:metalink/src/model/oembed.dart';
+import 'package:metalink/src/network/request_context.dart';
+import 'package:metalink/src/network/request_policy.dart';
 import 'package:metalink/src/util/json_utils.dart';
 
 import 'package:metalink/src/fetch/fetch_utils.dart';
@@ -16,6 +18,7 @@ class OEmbedEnricher {
     required Fetcher fetcher,
     required FetchOptions fetchOptions,
     required OEmbedEndpoint endpoint,
+    RequestContext? requestContext,
   }) async {
     final response = await FetchUtils.getWithRedirects(
       fetcher,
@@ -25,7 +28,11 @@ class OEmbedEnricher {
         'accept':
             'application/json, text/xml, application/xml;q=0.9, */*;q=0.8',
       },
-      maxBytes: 256 * 1024,
+      maxBytes: fetchOptions.maxBytes < _maxOEmbedBytes
+          ? fetchOptions.maxBytes
+          : _maxOEmbedBytes,
+      context: requestContext,
+      purpose: RequestPurpose.oEmbed,
     );
 
     if (response.error != null) return null;
@@ -33,13 +40,14 @@ class OEmbedEnricher {
     if (status == null || status < 200 || status >= 300) return null;
 
     final text = utf8.decode(response.bodyBytes, allowMalformed: true);
+    final resolvedEndpointUrl = response.url;
 
     switch (endpoint.format) {
       case OEmbedFormat.json:
-        return _parseJson(endpoint.url, text);
+        return _parseJson(resolvedEndpointUrl, text);
       case OEmbedFormat.xml:
         // If XML is declared but parsing fails, return null so enrichment stays best-effort.
-        return _parseXml(endpoint.url, text);
+        return _parseXml(resolvedEndpointUrl, text);
     }
   }
 
@@ -94,10 +102,10 @@ class OEmbedEnricher {
   }
 
   String? _xmlText(xml.XmlDocument doc, String name) {
-    final el = doc.findAllElements(name).cast<xml.XmlElement?>().firstWhere(
-          (e) => e != null,
-          orElse: () => null,
-        );
+    final el = doc
+        .findAllElements(name)
+        .cast<xml.XmlElement?>()
+        .firstWhere((e) => e != null, orElse: () => null);
     final text = el?.innerText;
     final v = text?.trim();
     return (v == null || v.isEmpty) ? null : v;
@@ -124,3 +132,5 @@ class OEmbedEnricher {
     return Uri.tryParse(s);
   }
 }
+
+const int _maxOEmbedBytes = 256 * 1024;

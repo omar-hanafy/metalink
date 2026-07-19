@@ -1,6 +1,7 @@
 import 'package:html/dom.dart';
 
 import 'package:metalink/src/model/diagnostics.dart';
+import 'package:metalink/src/model/errors.dart';
 import 'package:metalink/src/model/link_metadata.dart';
 import 'package:metalink/src/model/structured_data.dart';
 import 'package:metalink/src/util/json_utils.dart';
@@ -13,20 +14,37 @@ import 'package:metalink/src/extract/pipeline.dart';
 ///
 /// This stage is best-effort and must not throw; malformed JSON-LD is ignored.
 class JsonLdExtractor implements HtmlMetadataExtractorStage {
-  const JsonLdExtractor();
+  const JsonLdExtractor({this.limits = const JsonLdTraversalLimits()});
 
-  // Soft cap to avoid pathological pages consuming too much memory or time.
-  static const int _maxNodes = 250;
+  final JsonLdTraversalLimits limits;
 
   @override
   void extract(HtmlExtractContext context) {
     if (!context.extractOptions.extractJsonLd) return;
     // Extractor stages must not throw so one bad document cannot abort the pipeline.
     try {
-      final nodes = _collectJsonLdNodes(
-        context.document,
-        maxNodes: _maxNodes,
-      );
+      final collection = _collectJsonLdNodes(context.document, limits: limits);
+      final nodes = collection.nodes;
+      if (collection.malformedScripts > 0) {
+        context.addWarning(
+          MetaLinkWarning(
+            code: MetaLinkWarningCode.partialParse,
+            message:
+                'Ignored ${collection.malformedScripts} malformed JSON-LD script(s).',
+            uri: context.documentUrl,
+          ),
+        );
+      }
+      if (collection.limitReached) {
+        context.addWarning(
+          MetaLinkWarning(
+            code: MetaLinkWarningCode.partialParse,
+            message:
+                'JSON-LD traversal stopped at its configured node, visit, or depth limit, or JSON size limit.',
+            uri: context.documentUrl,
+          ),
+        );
+      }
       if (nodes.isEmpty) return;
 
       // 1) Always provide the full graph (best-effort) so callers can inspect it directly.
@@ -40,14 +58,33 @@ class JsonLdExtractor implements HtmlMetadataExtractorStage {
 
       // 2) Derive page-level fields from the most relevant nodes.
       final scored = <_ScoredNode>[];
-      for (final node in nodes) {
-        scored
-            .add(_ScoredNode(node, _pageRelevanceScore(node, context.baseUrl)));
+      final relevanceBudget = _JsonLdValueBudget(
+        maxVisitedValues: limits.maxDerivedValues,
+        maxDepth: limits.maxDepth,
+      );
+      for (var index = 0; index < nodes.length; index++) {
+        final node = nodes[index];
+        scored.add(
+          _ScoredNode(
+            node,
+            _pageRelevanceScore(node, context.documentUrl, relevanceBudget),
+            index,
+          ),
+        );
       }
-      scored.sort((a, b) => b.score.compareTo(a.score));
+      scored.sort((a, b) {
+        final byScore = b.score.compareTo(a.score);
+        return byScore != 0
+            ? byScore
+            : a.originalIndex.compareTo(b.originalIndex);
+      });
 
       // Apply extraction to a small set of top nodes and allow lower-ranked nodes to contribute.
       final int limit = scored.length < 12 ? scored.length : 12;
+      final extractionBudget = _JsonLdValueBudget(
+        maxVisitedValues: limits.maxDerivedValues,
+        maxDepth: limits.maxDepth,
+      );
       for (var i = 0; i < limit; i++) {
         final sn = scored[i];
         final strength = i == 0
@@ -57,15 +94,37 @@ class JsonLdExtractor implements HtmlMetadataExtractorStage {
           context: context,
           node: sn.node,
           strength: strength,
+          budget: extractionBudget,
         );
       }
-    } catch (_) {
-      // Swallow everything so malformed JSON-LD cannot break the pipeline.
+      if (relevanceBudget.limitReached || extractionBudget.limitReached) {
+        context.addWarning(
+          MetaLinkWarning(
+            code: MetaLinkWarningCode.partialParse,
+            message:
+                'JSON-LD derived-field traversal stopped at its configured visit or depth limit.',
+            uri: context.documentUrl,
+          ),
+        );
+      }
+    } catch (error) {
+      context.addWarning(
+        MetaLinkWarning(
+          code: MetaLinkWarningCode.partialParse,
+          message: 'JSON-LD extraction failed safely.',
+          uri: context.documentUrl,
+          cause: error,
+        ),
+      );
       return;
     }
   }
 
-  double _pageRelevanceScore(Map<String, dynamic> node, Uri baseUrl) {
+  double _pageRelevanceScore(
+    Map<String, dynamic> node,
+    Uri baseUrl,
+    _JsonLdValueBudget budget,
+  ) {
     // Higher score means the node is more likely to describe the page itself.
     double score = 0.0;
 
@@ -73,9 +132,13 @@ class JsonLdExtractor implements HtmlMetadataExtractorStage {
 
     // URL signals, weighted toward exact matches with the final page URL.
     final urls = <Uri>[
-      ..._extractUris(node['url'], baseUrl: baseUrl),
-      ..._extractUris(node['@id'], baseUrl: baseUrl),
-      ..._extractUris(node['mainEntityOfPage'], baseUrl: baseUrl),
+      ..._extractUris(node['url'], baseUrl: baseUrl, budget: budget),
+      ..._extractUris(node['@id'], baseUrl: baseUrl, budget: budget),
+      ..._extractUris(
+        node['mainEntityOfPage'],
+        baseUrl: baseUrl,
+        budget: budget,
+      ),
     ];
 
     for (final u in urls) {
@@ -101,7 +164,7 @@ class JsonLdExtractor implements HtmlMetadataExtractorStage {
         'BlogPosting',
         'VideoObject',
         'Product',
-        'Event'
+        'Event',
       ])) {
         score += _JsonLdScores.typePrimary;
       } else if (_hasType(types, const ['WebSite', 'Organization', 'Person'])) {
@@ -149,6 +212,7 @@ class JsonLdExtractor implements HtmlMetadataExtractorStage {
     required HtmlExtractContext context,
     required Map<String, dynamic> node,
     required _NodeStrength strength,
+    required _JsonLdValueBudget budget,
   }) {
     // Never throw from this so a single node cannot break extraction.
     try {
@@ -161,31 +225,32 @@ class JsonLdExtractor implements HtmlMetadataExtractorStage {
         context.setKind(
           kind,
           source: CandidateSource.jsonLd,
-          score: _scoreFor(strength,
-              primary: _JsonLdScores.kindPrimary,
-              secondary: _JsonLdScores.kindSecondary,
-              tertiary: _JsonLdScores.kindTertiary),
+          score: _scoreFor(
+            strength,
+            primary: _JsonLdScores.kindPrimary,
+            secondary: _JsonLdScores.kindSecondary,
+            tertiary: _JsonLdScores.kindTertiary,
+          ),
           evidence: evidence,
         );
       }
 
       // 2) Canonical URL: pick the best URL-like field as a stable reference.
       final canonical = _firstUriFrom(
-        candidates: [
-          node['mainEntityOfPage'],
-          node['url'],
-          node['@id'],
-        ],
+        candidates: [node['mainEntityOfPage'], node['url'], node['@id']],
         baseUrl: context.baseUrl,
+        budget: budget,
       );
       if (canonical != null) {
         context.addCanonicalUrl(
           canonical,
           source: CandidateSource.jsonLd,
-          score: _scoreFor(strength,
-              primary: _JsonLdScores.canonicalPrimary,
-              secondary: _JsonLdScores.canonicalSecondary,
-              tertiary: _JsonLdScores.canonicalTertiary),
+          score: _scoreFor(
+            strength,
+            primary: _JsonLdScores.canonicalPrimary,
+            secondary: _JsonLdScores.canonicalSecondary,
+            tertiary: _JsonLdScores.canonicalTertiary,
+          ),
           evidence: evidence,
         );
       }
@@ -196,10 +261,12 @@ class JsonLdExtractor implements HtmlMetadataExtractorStage {
         context.addTitle(
           title,
           source: CandidateSource.jsonLd,
-          score: _scoreFor(strength,
-              primary: _JsonLdScores.titlePrimary,
-              secondary: _JsonLdScores.titleSecondary,
-              tertiary: _JsonLdScores.titleTertiary),
+          score: _scoreFor(
+            strength,
+            primary: _JsonLdScores.titlePrimary,
+            secondary: _JsonLdScores.titleSecondary,
+            tertiary: _JsonLdScores.titleTertiary,
+          ),
           evidence: evidence,
         );
       }
@@ -210,10 +277,12 @@ class JsonLdExtractor implements HtmlMetadataExtractorStage {
         context.addDescription(
           description,
           source: CandidateSource.jsonLd,
-          score: _scoreFor(strength,
-              primary: _JsonLdScores.descriptionPrimary,
-              secondary: _JsonLdScores.descriptionSecondary,
-              tertiary: _JsonLdScores.descriptionTertiary),
+          score: _scoreFor(
+            strength,
+            primary: _JsonLdScores.descriptionPrimary,
+            secondary: _JsonLdScores.descriptionSecondary,
+            tertiary: _JsonLdScores.descriptionTertiary,
+          ),
           evidence: evidence,
         );
       }
@@ -225,10 +294,12 @@ class JsonLdExtractor implements HtmlMetadataExtractorStage {
         context.addLocale(
           locale,
           source: CandidateSource.jsonLd,
-          score: _scoreFor(strength,
-              primary: _JsonLdScores.localePrimary,
-              secondary: _JsonLdScores.localeSecondary,
-              tertiary: _JsonLdScores.localeTertiary),
+          score: _scoreFor(
+            strength,
+            primary: _JsonLdScores.localePrimary,
+            secondary: _JsonLdScores.localeSecondary,
+            tertiary: _JsonLdScores.localeTertiary,
+          ),
           evidence: evidence,
         );
       }
@@ -240,40 +311,47 @@ class JsonLdExtractor implements HtmlMetadataExtractorStage {
         context.addSiteName(
           siteName,
           source: CandidateSource.jsonLd,
-          score: _scoreFor(strength,
-              primary: _JsonLdScores.siteNamePrimary,
-              secondary: _JsonLdScores.siteNameSecondary,
-              tertiary: _JsonLdScores.siteNameTertiary),
+          score: _scoreFor(
+            strength,
+            primary: _JsonLdScores.siteNamePrimary,
+            secondary: _JsonLdScores.siteNameSecondary,
+            tertiary: _JsonLdScores.siteNameTertiary,
+          ),
           evidence: evidence,
         );
       }
 
       // 7) Author: collect explicit author fields for attribution.
-      for (final author in _authors(node)) {
+      for (final author in _authors(node, budget)) {
         if (author.isEmpty) continue;
         context.addAuthor(
           author,
           source: CandidateSource.jsonLd,
-          score: _scoreFor(strength,
-              primary: _JsonLdScores.authorPrimary,
-              secondary: _JsonLdScores.authorSecondary,
-              tertiary: _JsonLdScores.authorTertiary),
+          score: _scoreFor(
+            strength,
+            primary: _JsonLdScores.authorPrimary,
+            secondary: _JsonLdScores.authorSecondary,
+            tertiary: _JsonLdScores.authorTertiary,
+          ),
           evidence: evidence,
         );
       }
 
       // 8) Dates: parse published and modified timestamps for timelines.
-      final publishedAt = _tryParseDateTime(node['datePublished']) ??
+      final publishedAt =
+          _tryParseDateTime(node['datePublished']) ??
           _tryParseDateTime(node['uploadDate']) ??
           _tryParseDateTime(node['startDate']);
       if (publishedAt != null) {
         context.addPublishedAt(
           publishedAt,
           source: CandidateSource.jsonLd,
-          score: _scoreFor(strength,
-              primary: _JsonLdScores.publishedPrimary,
-              secondary: _JsonLdScores.publishedSecondary,
-              tertiary: _JsonLdScores.publishedTertiary),
+          score: _scoreFor(
+            strength,
+            primary: _JsonLdScores.publishedPrimary,
+            secondary: _JsonLdScores.publishedSecondary,
+            tertiary: _JsonLdScores.publishedTertiary,
+          ),
           evidence: evidence,
         );
       }
@@ -283,24 +361,28 @@ class JsonLdExtractor implements HtmlMetadataExtractorStage {
         context.addModifiedAt(
           modifiedAt,
           source: CandidateSource.jsonLd,
-          score: _scoreFor(strength,
-              primary: _JsonLdScores.modifiedPrimary,
-              secondary: _JsonLdScores.modifiedSecondary,
-              tertiary: _JsonLdScores.modifiedTertiary),
+          score: _scoreFor(
+            strength,
+            primary: _JsonLdScores.modifiedPrimary,
+            secondary: _JsonLdScores.modifiedSecondary,
+            tertiary: _JsonLdScores.modifiedTertiary,
+          ),
           evidence: evidence,
         );
       }
 
       // 9) Keywords: split tags to enable search and filtering.
-      for (final kw in _keywords(node['keywords'])) {
+      for (final kw in _keywords(node['keywords'], budget)) {
         if (kw.isEmpty) continue;
         context.addKeyword(
           kw,
           source: CandidateSource.jsonLd,
-          score: _scoreFor(strength,
-              primary: _JsonLdScores.keywordPrimary,
-              secondary: _JsonLdScores.keywordSecondary,
-              tertiary: _JsonLdScores.keywordTertiary),
+          score: _scoreFor(
+            strength,
+            primary: _JsonLdScores.keywordPrimary,
+            secondary: _JsonLdScores.keywordSecondary,
+            tertiary: _JsonLdScores.keywordTertiary,
+          ),
           evidence: evidence,
         );
       }
@@ -312,14 +394,20 @@ class JsonLdExtractor implements HtmlMetadataExtractorStage {
         node['logo'],
       ];
       for (final v in imageValues) {
-        for (final uri in _extractUris(v, baseUrl: context.baseUrl)) {
+        for (final uri in _extractUris(
+          v,
+          baseUrl: context.baseUrl,
+          budget: budget,
+        )) {
           context.addImageUri(
             uri,
             source: CandidateSource.jsonLd,
-            score: _scoreFor(strength,
-                primary: _JsonLdScores.imagePrimary,
-                secondary: _JsonLdScores.imageSecondary,
-                tertiary: _JsonLdScores.imageTertiary),
+            score: _scoreFor(
+              strength,
+              primary: _JsonLdScores.imagePrimary,
+              secondary: _JsonLdScores.imageSecondary,
+              tertiary: _JsonLdScores.imageTertiary,
+            ),
             evidence: evidence,
           );
         }
@@ -327,42 +415,57 @@ class JsonLdExtractor implements HtmlMetadataExtractorStage {
 
       // 11) Videos or Audios: extract media URLs for rich previews.
       if (_hasType(types, const ['VideoObject'])) {
-        for (final uri
-            in _extractUris(node['contentUrl'], baseUrl: context.baseUrl)) {
+        for (final uri in _extractUris(
+          node['contentUrl'],
+          baseUrl: context.baseUrl,
+          budget: budget,
+        )) {
           context.addVideoUri(
             uri,
             source: CandidateSource.jsonLd,
-            score: _scoreFor(strength,
-                primary: _JsonLdScores.videoPrimary,
-                secondary: _JsonLdScores.videoSecondary,
-                tertiary: _JsonLdScores.videoTertiary),
+            score: _scoreFor(
+              strength,
+              primary: _JsonLdScores.videoPrimary,
+              secondary: _JsonLdScores.videoSecondary,
+              tertiary: _JsonLdScores.videoTertiary,
+            ),
             evidence: evidence,
           );
         }
-        for (final uri
-            in _extractUris(node['embedUrl'], baseUrl: context.baseUrl)) {
+        for (final uri in _extractUris(
+          node['embedUrl'],
+          baseUrl: context.baseUrl,
+          budget: budget,
+        )) {
           context.addVideoUri(
             uri,
             source: CandidateSource.jsonLd,
-            score: _scoreFor(strength,
-                primary: _JsonLdScores.videoEmbedPrimary,
-                secondary: _JsonLdScores.videoEmbedSecondary,
-                tertiary: _JsonLdScores.videoEmbedTertiary),
+            score: _scoreFor(
+              strength,
+              primary: _JsonLdScores.videoEmbedPrimary,
+              secondary: _JsonLdScores.videoEmbedSecondary,
+              tertiary: _JsonLdScores.videoEmbedTertiary,
+            ),
             evidence: evidence,
           );
         }
       }
 
       if (_hasType(types, const ['AudioObject'])) {
-        for (final uri
-            in _extractUris(node['contentUrl'], baseUrl: context.baseUrl)) {
+        for (final uri in _extractUris(
+          node['contentUrl'],
+          baseUrl: context.baseUrl,
+          budget: budget,
+        )) {
           context.addAudioUri(
             uri,
             source: CandidateSource.jsonLd,
-            score: _scoreFor(strength,
-                primary: _JsonLdScores.audioPrimary,
-                secondary: _JsonLdScores.audioSecondary,
-                tertiary: _JsonLdScores.audioTertiary),
+            score: _scoreFor(
+              strength,
+              primary: _JsonLdScores.audioPrimary,
+              secondary: _JsonLdScores.audioSecondary,
+              tertiary: _JsonLdScores.audioTertiary,
+            ),
             evidence: evidence,
           );
         }
@@ -396,7 +499,9 @@ class JsonLdExtractor implements HtmlMetadataExtractorStage {
   }
 
   String? _siteNameFromWebSiteNode(
-      Map<String, dynamic> node, List<String> types) {
+    Map<String, dynamic> node,
+    List<String> types,
+  ) {
     // For WebSite nodes, name typically represents the site name.
     if (_hasType(types, const ['WebSite'])) {
       return _asString(node['name']) ?? _asString(node['headline']);
@@ -404,75 +509,69 @@ class JsonLdExtractor implements HtmlMetadataExtractorStage {
     return null;
   }
 
-  Iterable<String> _authors(Map<String, dynamic> node) sync* {
+  List<String> _authors(Map<String, dynamic> node, _JsonLdValueBudget budget) {
     final author = node['author'];
-    if (author == null) return;
-
-    if (author is String) {
-      final s = author.trim();
-      if (s.isNotEmpty) yield s;
-      return;
-    }
-
-    if (author is List) {
-      for (final item in author) {
-        yield* _authorsFromValue(item);
-      }
-      return;
-    }
-
-    yield* _authorsFromValue(author);
+    return author == null
+        ? const <String>[]
+        : _authorsFromValue(author, budget);
   }
 
-  Iterable<String> _authorsFromValue(dynamic value) sync* {
-    if (value is String) {
-      final s = value.trim();
-      if (s.isNotEmpty) yield s;
-      return;
-    }
-    if (value is Map) {
-      final map = _stringKeyedMap(value);
-      if (map == null) return;
-      final name = _asString(map['name']);
-      if (name != null) yield name;
-      return;
-    }
-    if (value is List) {
-      for (final v in value) {
-        yield* _authorsFromValue(v);
+  List<String> _authorsFromValue(dynamic root, _JsonLdValueBudget budget) {
+    final out = <String>[];
+    final stack = <_TraversalEntry>[_TraversalEntry(root, 0)];
+    while (stack.isNotEmpty) {
+      final entry = stack.removeLast();
+      if (!budget.visit(entry.depth)) continue;
+      final value = entry.value;
+      if (value is String) {
+        final candidate = value.trim();
+        if (candidate.isNotEmpty) out.add(candidate);
+      } else if (value is Map) {
+        final map = _stringKeyedMap(value);
+        final name = map == null ? null : _asString(map['name']);
+        if (name != null) out.add(name);
+      } else if (value is List) {
+        for (final child in value.reversed) {
+          if (budget.canEnqueue(entry.depth + 1, stack.length)) {
+            stack.add(_TraversalEntry(child, entry.depth + 1));
+          }
+        }
       }
-      return;
     }
+    return out;
   }
 
-  Iterable<String> _keywords(dynamic value) sync* {
-    if (value == null) return;
+  List<String> _keywords(dynamic value, _JsonLdValueBudget budget) {
+    if (value == null || !budget.visit(0)) return const <String>[];
+    final out = <String>[];
 
     if (value is String) {
       final s = value.trim();
-      if (s.isEmpty) return;
+      if (s.isEmpty) return out;
 
       // Split comma-separated keyword strings to preserve individual tags.
       if (s.contains(',')) {
         for (final part in s.split(',')) {
+          if (!budget.visit(1)) break;
           final kw = part.trim();
-          if (kw.isNotEmpty) yield kw;
+          if (kw.isNotEmpty) out.add(kw);
         }
       } else {
-        yield s;
+        out.add(s);
       }
-      return;
+      return out;
     }
 
     if (value is List) {
       for (final v in value) {
+        if (!budget.visit(1)) break;
         if (v is String) {
           final kw = v.trim();
-          if (kw.isNotEmpty) yield kw;
+          if (kw.isNotEmpty) out.add(kw);
         }
       }
-      return;
     }
+    return out;
   }
 
   DateTime? _tryParseDateTime(dynamic value) {
@@ -500,9 +599,10 @@ class JsonLdExtractor implements HtmlMetadataExtractorStage {
   Uri? _firstUriFrom({
     required List<dynamic> candidates,
     required Uri baseUrl,
+    required _JsonLdValueBudget budget,
   }) {
     for (final c in candidates) {
-      final uris = _extractUris(c, baseUrl: baseUrl);
+      final uris = _extractUris(c, baseUrl: baseUrl, budget: budget);
       if (uris.isNotEmpty) return uris.first;
     }
     return null;
@@ -511,9 +611,10 @@ class JsonLdExtractor implements HtmlMetadataExtractorStage {
   List<Uri> _extractUris(
     dynamic value, {
     required Uri baseUrl,
+    required _JsonLdValueBudget budget,
   }) {
     final urls = <String>[];
-    _collectUrlStrings(value, urls);
+    _collectUrlStrings(value, urls, budget);
 
     final out = <Uri>[];
     for (final raw in urls) {
@@ -521,59 +622,63 @@ class JsonLdExtractor implements HtmlMetadataExtractorStage {
       if (uri == null) continue;
       final scheme = uri.scheme.toLowerCase();
       if (scheme != 'http' && scheme != 'https') continue;
+      if (!uri.hasAuthority || uri.host.isEmpty) continue;
       out.add(uri);
     }
     return out;
   }
 
-  void _collectUrlStrings(dynamic value, List<String> out) {
-    if (value == null) return;
+  void _collectUrlStrings(
+    dynamic root,
+    List<String> out,
+    _JsonLdValueBudget budget,
+  ) {
+    final stack = <_TraversalEntry>[_TraversalEntry(root, 0)];
+    const directKeys = <String>[
+      'url',
+      '@id',
+      'contentUrl',
+      'embedUrl',
+      'thumbnailUrl',
+      'logo',
+      'sameAs',
+    ];
 
-    if (value is String) {
-      final s = value.trim();
-      if (s.isNotEmpty) out.add(s);
-      return;
-    }
-
-    if (value is List) {
-      for (final item in value) {
-        _collectUrlStrings(item, out);
+    while (stack.isNotEmpty) {
+      final entry = stack.removeLast();
+      if (!budget.visit(entry.depth)) continue;
+      final value = entry.value;
+      if (value is String) {
+        final candidate = value.trim();
+        if (candidate.isNotEmpty) out.add(candidate);
+        continue;
       }
-      return;
-    }
-
-    if (value is Map) {
-      final map = _stringKeyedMap(value);
-      if (map == null) return;
-
-      // Common URL-like keys in schema.org nodes.
-      final directKeys = <String>[
-        'url',
-        '@id',
-        'contentUrl',
-        'embedUrl',
-        'thumbnailUrl',
-        'logo',
-        'sameAs',
-      ];
-
-      for (final k in directKeys) {
-        final v = map[k];
-        if (v is String) {
-          final s = v.trim();
-          if (s.isNotEmpty) out.add(s);
-        } else if (v is List || v is Map) {
-          _collectUrlStrings(v, out);
+      if (value is List) {
+        for (final child in value.reversed) {
+          if (budget.canEnqueue(entry.depth + 1, stack.length)) {
+            stack.add(_TraversalEntry(child, entry.depth + 1));
+          }
+        }
+        continue;
+      }
+      if (value is Map) {
+        final map = _stringKeyedMap(value);
+        if (map == null) continue;
+        final children = <dynamic>[
+          for (final key in directKeys)
+            if (map[key] is String || map[key] is List || map[key] is Map)
+              map[key],
+          if (map['mainEntityOfPage'] is String ||
+              map['mainEntityOfPage'] is List ||
+              map['mainEntityOfPage'] is Map)
+            map['mainEntityOfPage'],
+        ];
+        for (final child in children.reversed) {
+          if (budget.canEnqueue(entry.depth + 1, stack.length)) {
+            stack.add(_TraversalEntry(child, entry.depth + 1));
+          }
         }
       }
-
-      // Some nodes wrap mainEntityOfPage as a nested object with @id.
-      final meop = map['mainEntityOfPage'];
-      if (meop is Map || meop is List || meop is String) {
-        _collectUrlStrings(meop, out);
-      }
-
-      return;
     }
   }
 
@@ -657,19 +762,26 @@ class JsonLdExtractor implements HtmlMetadataExtractorStage {
       'NewsArticle',
       'BlogPosting',
       'Report',
-      'ScholarlyArticle'
+      'ScholarlyArticle',
     ])) {
       return LinkKind.article;
     }
-    if (_hasType(
-        types, const ['Product', 'AggregateOffer', 'Offer', 'Brand'])) {
+    if (_hasType(types, const [
+      'Product',
+      'AggregateOffer',
+      'Offer',
+      'Brand',
+    ])) {
       return LinkKind.product;
     }
     if (_hasType(types, const ['VideoObject', 'Clip', 'Movie', 'TVEpisode'])) {
       return LinkKind.video;
     }
-    if (_hasType(
-        types, const ['AudioObject', 'MusicRecording', 'PodcastEpisode'])) {
+    if (_hasType(types, const [
+      'AudioObject',
+      'MusicRecording',
+      'PodcastEpisode',
+    ])) {
       return LinkKind.audio;
     }
     if (_hasType(types, const ['ProfilePage'])) {
@@ -722,14 +834,42 @@ class JsonLdExtractor implements HtmlMetadataExtractorStage {
   }
 }
 
-List<Map<String, dynamic>> _collectJsonLdNodes(
+/// Resource limits applied while traversing decoded JSON-LD values.
+class JsonLdTraversalLimits {
+  const JsonLdTraversalLimits({
+    this.maxNodes = 250,
+    this.maxVisitedValues = 4000,
+    this.maxDepth = 64,
+    this.maxJsonCharacters = 512 * 1024,
+    this.maxDerivedValues = 4000,
+  }) : assert(maxNodes > 0),
+       assert(maxVisitedValues > 0),
+       assert(maxDepth >= 0),
+       assert(maxJsonCharacters > 0),
+       assert(maxDerivedValues > 0);
+
+  final int maxNodes;
+  final int maxVisitedValues;
+  final int maxDepth;
+
+  /// Maximum aggregate JSON-LD script characters decoded from one document.
+  final int maxJsonCharacters;
+
+  /// Maximum nested values inspected while deriving fields from retained nodes.
+  final int maxDerivedValues;
+}
+
+_JsonLdCollection _collectJsonLdNodes(
   Document document, {
-  required int maxNodes,
+  required JsonLdTraversalLimits limits,
 }) {
   final scripts = document.querySelectorAll('script');
   final out = <Map<String, dynamic>>[];
-
   final seenIds = <String>{};
+  var visitedValues = 0;
+  var malformedScripts = 0;
+  var limitReached = false;
+  var decodedCharacters = 0;
 
   for (final el in scripts) {
     final typeAttr = (el.attributes['type'] ?? '').toLowerCase().trim();
@@ -740,48 +880,103 @@ List<Map<String, dynamic>> _collectJsonLdNodes(
 
     final raw = el.text;
     if (raw.trim().isEmpty) continue;
+    if (raw.length > limits.maxJsonCharacters - decodedCharacters) {
+      limitReached = true;
+      break;
+    }
+    decodedCharacters += raw.length;
 
     final decoded = JsonUtils.tryDecodeAny(raw);
-    if (decoded == null) continue;
-
-    for (final node in _deepCollectNodes(
-      decoded,
-      limit: maxNodes - out.length,
-    )) {
-      if (out.length >= maxNodes) break;
-
-      final id = _asString(node['@id']);
-      if (id != null && id.isNotEmpty) {
-        if (seenIds.contains(id)) continue;
-        seenIds.add(id);
-      }
-
-      out.add(node);
+    if (decoded == null) {
+      malformedScripts++;
+      continue;
     }
 
-    if (out.length >= maxNodes) break;
+    final traversal = _deepCollectNodes(
+      decoded,
+      maxNodes: limits.maxNodes - out.length,
+      maxVisitedValues: limits.maxVisitedValues - visitedValues,
+      maxDepth: limits.maxDepth,
+      seenIds: seenIds,
+    );
+    out.addAll(traversal.nodes);
+    visitedValues += traversal.visitedValues;
+    limitReached = limitReached || traversal.limitReached;
+
+    if (out.length >= limits.maxNodes ||
+        visitedValues >= limits.maxVisitedValues) {
+      if (scripts.last != el) limitReached = true;
+      break;
+    }
   }
 
-  return out;
+  return _JsonLdCollection(
+    nodes: List<Map<String, dynamic>>.unmodifiable(out),
+    malformedScripts: malformedScripts,
+    limitReached: limitReached,
+  );
 }
 
-List<Map<String, dynamic>> _deepCollectNodes(
+_JsonLdTraversal _deepCollectNodes(
   dynamic root, {
-  required int limit,
+  required int maxNodes,
+  required int maxVisitedValues,
+  required int maxDepth,
+  required Set<String> seenIds,
 }) {
   final nodes = <Map<String, dynamic>>[];
-  if (limit <= 0) return nodes;
+  if (maxNodes <= 0 || maxVisitedValues <= 0) {
+    return const _JsonLdTraversal(
+      nodes: [],
+      visitedValues: 0,
+      limitReached: true,
+    );
+  }
 
-  final stack = <dynamic>[root];
+  final stack = <_TraversalEntry>[_TraversalEntry(root, 0)];
+  var visitedValues = 0;
+  var limitReached = false;
 
-  while (stack.isNotEmpty && nodes.length < limit) {
-    final current = stack.removeLast();
+  void enqueueAll(Iterable<dynamic> values, int depth) {
+    if (depth > maxDepth) {
+      limitReached = true;
+      return;
+    }
+    final remaining = maxVisitedValues - visitedValues - stack.length;
+    if (remaining <= 0) {
+      limitReached = true;
+      return;
+    }
+
+    final accepted = <dynamic>[];
+    for (final value in values) {
+      if (accepted.length >= remaining) {
+        limitReached = true;
+        break;
+      }
+      accepted.add(value);
+    }
+    for (final value in accepted.reversed) {
+      stack.add(_TraversalEntry(value, depth));
+    }
+  }
+
+  while (stack.isNotEmpty && nodes.length < maxNodes) {
+    if (visitedValues >= maxVisitedValues) {
+      limitReached = true;
+      break;
+    }
+
+    final entry = stack.removeLast();
+    visitedValues++;
+    if (entry.depth > maxDepth) {
+      limitReached = true;
+      continue;
+    }
+    final current = entry.value;
 
     if (current is List) {
-      for (final item in current) {
-        if (nodes.length >= limit) break;
-        stack.add(item);
-      }
+      enqueueAll(current, entry.depth + 1);
       continue;
     }
 
@@ -790,28 +985,92 @@ List<Map<String, dynamic>> _deepCollectNodes(
       if (map == null) continue;
 
       if (_looksLikeNode(map)) {
-        nodes.add(map);
-        if (nodes.length >= limit) break;
-      }
-
-      final graph = map['@graph'];
-      if (graph is List) {
-        for (final item in graph) {
-          if (nodes.length >= limit) break;
-          stack.add(item);
+        final id = _asString(map['@id']);
+        if (id == null || id.isEmpty || seenIds.add(id)) {
+          nodes.add(map);
+          if (nodes.length >= maxNodes) {
+            if (stack.isNotEmpty ||
+                map.values.any((value) => value is Map || value is List)) {
+              limitReached = true;
+            }
+            break;
+          }
         }
       }
 
-      for (final v in map.values) {
-        if (nodes.length >= limit) break;
-        if (v is Map || v is List) {
-          stack.add(v);
-        }
-      }
+      // Traverse every child exactly once. `@graph` is a normal map value and
+      // must not be pushed separately, otherwise graph nodes are duplicated.
+      enqueueAll(
+        map.values.where((value) => value is Map || value is List),
+        entry.depth + 1,
+      );
     }
   }
 
-  return nodes;
+  if (stack.isNotEmpty) limitReached = true;
+  return _JsonLdTraversal(
+    nodes: List<Map<String, dynamic>>.unmodifiable(nodes),
+    visitedValues: visitedValues,
+    limitReached: limitReached,
+  );
+}
+
+class _JsonLdCollection {
+  const _JsonLdCollection({
+    required this.nodes,
+    required this.malformedScripts,
+    required this.limitReached,
+  });
+
+  final List<Map<String, dynamic>> nodes;
+  final int malformedScripts;
+  final bool limitReached;
+}
+
+class _JsonLdTraversal {
+  const _JsonLdTraversal({
+    required this.nodes,
+    required this.visitedValues,
+    required this.limitReached,
+  });
+
+  final List<Map<String, dynamic>> nodes;
+  final int visitedValues;
+  final bool limitReached;
+}
+
+class _TraversalEntry {
+  const _TraversalEntry(this.value, this.depth);
+
+  final dynamic value;
+  final int depth;
+}
+
+class _JsonLdValueBudget {
+  _JsonLdValueBudget({required this.maxVisitedValues, required this.maxDepth});
+
+  final int maxVisitedValues;
+  final int maxDepth;
+
+  var visitedValues = 0;
+  var limitReached = false;
+
+  bool visit(int depth) {
+    if (depth > maxDepth || visitedValues >= maxVisitedValues) {
+      limitReached = true;
+      return false;
+    }
+    visitedValues++;
+    return true;
+  }
+
+  bool canEnqueue(int depth, int pendingValues) {
+    if (depth > maxDepth || visitedValues + pendingValues >= maxVisitedValues) {
+      limitReached = true;
+      return false;
+    }
+    return true;
+  }
 }
 
 Map<String, dynamic>? _stringKeyedMap(Map<dynamic, dynamic> raw) {
@@ -925,8 +1184,9 @@ class _JsonLdScores {
 enum _NodeStrength { primary, secondary, tertiary }
 
 class _ScoredNode {
-  _ScoredNode(this.node, this.score);
+  _ScoredNode(this.node, this.score, this.originalIndex);
 
   final Map<String, dynamic> node;
   final double score;
+  final int originalIndex;
 }

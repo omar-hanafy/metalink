@@ -4,9 +4,9 @@ import 'package:metalink/src/model/url_optimization.dart';
 /// Indicates how the character encoding was determined for fetched HTML.
 ///
 /// The charset detection process checks multiple sources in priority order:
-/// 1. [header] - From the `Content-Type` HTTP header (most reliable).
-/// 2. [meta] - From a `<meta charset>` or `<meta http-equiv="Content-Type">` tag.
-/// 3. [bom] - From a Byte Order Mark at the start of the response.
+/// 1. [bom] - From a Byte Order Mark at the start of the response.
+/// 2. [header] - From the `Content-Type` HTTP header.
+/// 3. [meta] - From a `<meta charset>` or `<meta http-equiv="Content-Type">` tag.
 /// 4. [fallback] - Defaulted to UTF-8 when no charset was found.
 /// 5. [unknown] - Unable to determine; may produce decoding issues.
 enum CharsetSource {
@@ -170,6 +170,125 @@ class FieldProvenance {
   }
 }
 
+/// Provenance for one item in a collection-valued metadata field.
+///
+/// Unlike [FieldProvenance], which describes the winning field-level value,
+/// this record keeps provenance attached to a concrete image, icon, video,
+/// audio, or keyword after ranking and deduplication.
+class ItemProvenance {
+  const ItemProvenance({
+    required this.itemKey,
+    required this.provenance,
+    this.contributors = const <FieldProvenance>[],
+  });
+
+  /// Stable identifier for the returned item, usually its normalized URL.
+  final String itemKey;
+
+  /// The candidate that supplied the retained item.
+  final FieldProvenance provenance;
+
+  /// Every candidate that supplied data retained in the merged item.
+  ///
+  /// The first value is normally [provenance]. Lower-ranked duplicates appear
+  /// only when they filled an attribute missing from the leading candidate.
+  final List<FieldProvenance> contributors;
+
+  Map<String, dynamic> toJson() {
+    return <String, dynamic>{
+      'itemKey': itemKey,
+      'provenance': provenance.toJson(),
+      'contributors': contributors
+          .map((contributor) => contributor.toJson())
+          .toList(growable: false),
+    };
+  }
+
+  factory ItemProvenance.fromJson(Map<String, dynamic> json) {
+    final provenance = FieldProvenance.fromJson(
+      json.getMap<String, dynamic>(
+        'provenance',
+        defaultValue: const <String, dynamic>{},
+      ),
+    );
+    final contributorValues = Convert.tryToList<dynamic>(json['contributors']);
+    final contributors = contributorValues == null
+        ? <FieldProvenance>[provenance]
+        : contributorValues
+              .whereType<Map>()
+              .map(
+                (value) =>
+                    FieldProvenance.fromJson(Map<String, dynamic>.from(value)),
+              )
+              .toList(growable: false);
+
+    return ItemProvenance(
+      itemKey: json.getString('itemKey', defaultValue: ''),
+      provenance: provenance,
+      contributors: contributors,
+    );
+  }
+}
+
+/// One candidate considered by the ranking policy for a metadata field.
+///
+/// Candidate decisions are diagnostic data. They explain the effective score
+/// used by the ranking policy without changing the stable metadata model.
+class CandidateDecision {
+  const CandidateDecision({
+    required this.valueKey,
+    required this.source,
+    required this.score,
+    required this.effectiveScore,
+    required this.selected,
+    this.evidence,
+  });
+
+  /// Stable, display-safe representation of the candidate value.
+  final String valueKey;
+
+  /// Source that emitted the candidate.
+  final CandidateSource source;
+
+  /// Base confidence score emitted by the extractor.
+  final double score;
+
+  /// Score after field-specific quality signals were applied.
+  final double effectiveScore;
+
+  /// Whether this candidate supplied a retained result.
+  final bool selected;
+
+  /// Optional extraction evidence.
+  final String? evidence;
+
+  Map<String, dynamic> toJson() {
+    return <String, dynamic>{
+      'valueKey': valueKey,
+      'source': source.name,
+      'score': score,
+      'effectiveScore': effectiveScore,
+      'selected': selected,
+      'evidence': evidence,
+    };
+  }
+
+  factory CandidateDecision.fromJson(Map<String, dynamic> json) {
+    return CandidateDecision(
+      valueKey: json.getString('valueKey', defaultValue: ''),
+      source: json.getEnum(
+        'source',
+        parser: EnumParsers.byName(CandidateSource.values),
+        defaultValue: CandidateSource.heuristic,
+      ),
+      score: json.tryGetDouble('score') ?? 0.0,
+      effectiveScore: json.tryGetDouble('effectiveScore') ?? 0.0,
+      selected: json.getBool('selected', defaultValue: false),
+      evidence: json.tryGetString('evidence'),
+    );
+  }
+}
+
 /// Diagnostic information about the HTTP fetch phase.
 ///
 /// [FetchDiagnostics] provides insight into what happened during the network
@@ -181,7 +300,7 @@ class FieldProvenance {
 /// ### Example
 /// ```dart
 /// final result = await MetaLink.extract(url);
-/// final fetch = result.diagnostics?.fetch;
+/// final fetch = result.diagnostics.fetch;
 /// if (fetch != null) {
 ///   print('Fetched ${fetch.bytesRead} bytes in ${fetch.duration.inMilliseconds}ms');
 ///   print('Redirects: ${fetch.redirects.length}');
@@ -296,6 +415,9 @@ class ExtractionDiagnostics {
     required this.totalTime,
     required this.fetch,
     required this.fieldProvenance,
+    this.provenanceAvailable = true,
+    this.itemProvenance = const <MetaField, List<ItemProvenance>>{},
+    this.candidateDecisions = const <MetaField, List<CandidateDecision>>{},
   });
 
   /// Whether the result was served from cache.
@@ -310,14 +432,42 @@ class ExtractionDiagnostics {
   /// Maps each [MetaField] to its [FieldProvenance], showing which source won.
   final Map<MetaField, FieldProvenance> fieldProvenance;
 
+  /// Whether provenance was retained by the producer of these diagnostics.
+  ///
+  /// A metadata-only cache entry sets this to `false`, so an empty provenance
+  /// map is distinguishable from a fresh extraction that found no candidates.
+  final bool provenanceAvailable;
+
+  /// Provenance for each retained item in collection-valued metadata fields.
+  final Map<MetaField, List<ItemProvenance>> itemProvenance;
+
+  /// Ranked candidates considered for each field.
+  ///
+  /// This is empty when the producer did not request or retain decision data,
+  /// such as a compact metadata-only cache entry.
+  final Map<MetaField, List<CandidateDecision>> candidateDecisions;
+
   Map<String, dynamic> toJson() {
     return <String, dynamic>{
       'cacheHit': cacheHit,
       'totalTimeMs': totalTime.inMilliseconds,
       'fetch': fetch?.toJson(),
+      'provenanceAvailable': provenanceAvailable,
       'fieldProvenance': <String, dynamic>{
         for (final entry in fieldProvenance.entries)
           entry.key.name: entry.value.toJson(),
+      },
+      'itemProvenance': <String, dynamic>{
+        for (final entry in itemProvenance.entries)
+          entry.key.name: entry.value
+              .map((item) => item.toJson())
+              .toList(growable: false),
+      },
+      'candidateDecisions': <String, dynamic>{
+        for (final entry in candidateDecisions.entries)
+          entry.key.name: entry.value
+              .map((decision) => decision.toJson())
+              .toList(growable: false),
       },
     };
   }
@@ -325,6 +475,8 @@ class ExtractionDiagnostics {
   factory ExtractionDiagnostics.fromJson(Map<String, dynamic> json) {
     final fpRaw = json.tryGetMap<String, dynamic>('fieldProvenance');
     final fp = <MetaField, FieldProvenance>{};
+    final itemProvenance = <MetaField, List<ItemProvenance>>{};
+    final candidateDecisions = <MetaField, List<CandidateDecision>>{};
 
     if (fpRaw != null) {
       for (final entry in fpRaw.entries) {
@@ -342,13 +494,60 @@ class ExtractionDiagnostics {
       }
     }
 
+    final itemRaw = json.tryGetMap<String, dynamic>('itemProvenance');
+    if (itemRaw != null) {
+      for (final entry in itemRaw.entries) {
+        final field = Convert.tryToEnum(
+          entry.key,
+          parser: EnumParsers.byName(MetaField.values),
+        );
+        final values = Convert.tryToList<dynamic>(entry.value);
+        if (field == null || values == null) continue;
+
+        itemProvenance[field] = values
+            .whereType<Map>()
+            .map(
+              (item) =>
+                  ItemProvenance.fromJson(Map<String, dynamic>.from(item)),
+            )
+            .toList(growable: false);
+      }
+    }
+
+    final decisionsRaw = json.tryGetMap<String, dynamic>('candidateDecisions');
+    if (decisionsRaw != null) {
+      for (final entry in decisionsRaw.entries) {
+        final field = Convert.tryToEnum(
+          entry.key,
+          parser: EnumParsers.byName(MetaField.values),
+        );
+        final values = Convert.tryToList<dynamic>(entry.value);
+        if (field == null || values == null) continue;
+
+        candidateDecisions[field] = values
+            .whereType<Map>()
+            .map(
+              (decision) => CandidateDecision.fromJson(
+                Map<String, dynamic>.from(decision),
+              ),
+            )
+            .toList(growable: false);
+      }
+    }
+
     return ExtractionDiagnostics(
       cacheHit: json.getBool('cacheHit', defaultValue: false),
       totalTime: Duration(
         milliseconds: json.getInt('totalTimeMs', defaultValue: 0),
       ),
       fetch: json.tryParse('fetch', FetchDiagnostics.fromJson),
+      provenanceAvailable: json.getBool(
+        'provenanceAvailable',
+        defaultValue: true,
+      ),
       fieldProvenance: fp,
+      itemProvenance: itemProvenance,
+      candidateDecisions: candidateDecisions,
     );
   }
 }
@@ -373,11 +572,11 @@ enum MetaLinkLogLevel {
 /// A structured log record emitted during extraction.
 ///
 /// [MetaLinkLogRecord] captures internal events for debugging and monitoring.
-/// Use [MetaLinkOptions.logSink] to receive these records.
+/// Pass a [MetaLinkLogSink] to `MetaLinkClient(logSink: ...)` to receive them.
 ///
 /// ### Example
 /// ```dart
-/// final options = MetaLinkOptions(
+/// final client = MetaLinkClient(
 ///   logSink: (record) {
 ///     print('[${record.level.name}] ${record.message}');
 ///   },
@@ -415,5 +614,5 @@ class MetaLinkLogRecord {
 
 /// Callback signature for receiving log records.
 ///
-/// See [MetaLinkOptions.logSink] for usage.
+/// Pass this callback to the `MetaLinkClient` constructor.
 typedef MetaLinkLogSink = void Function(MetaLinkLogRecord record);

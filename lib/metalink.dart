@@ -1,5 +1,6 @@
 // ignore_for_file: always_use_package_imports, unnecessary_library_name
 // Keep these ignores local to this library file while still exporting public APIs.
+/// Metadata extraction, pure parsing, request policy, caching, and diagnostics.
 library metalink;
 
 import 'dart:async';
@@ -9,10 +10,22 @@ import 'src/options.dart';
 import 'src/result.dart';
 import 'src/cache/cache_store.dart';
 import 'src/model/link_metadata.dart';
+import 'src/network/request_context.dart';
 
 export 'src/client.dart';
 export 'src/options.dart';
 export 'src/result.dart';
+
+export 'src/fetch/fetcher.dart';
+export 'src/fetch/http_fetcher.dart';
+export 'src/network/request_context.dart';
+export 'src/network/request_engine.dart';
+export 'src/network/request_policy.dart';
+
+export 'src/parse/metalink_parser.dart';
+export 'src/parse/web_decoder.dart';
+export 'src/extract/candidate.dart';
+export 'src/extract/ranking.dart';
 
 export 'src/cache/cache_store.dart';
 export 'src/cache/cache_key.dart';
@@ -68,13 +81,12 @@ class MetaLink {
     String url, {
     MetaLinkClientOptions options = const MetaLinkClientOptions(),
     CacheStore? cacheStore,
+    RequestContext? requestContext,
     bool skipCache = false,
   }) async {
     // If no cacheStore is provided, disable caching to avoid creating a short-lived MemoryCacheStore.
     final effectiveOptions = cacheStore == null
-        ? options.copyWith(
-            cache: options.cache.copyWith(enabled: false),
-          )
+        ? options.copyWith(cache: options.cache.copyWith(enabled: false))
         : options;
 
     final client = MetaLinkClient(
@@ -85,10 +97,11 @@ class MetaLink {
     try {
       return await client.extract(
         url,
+        requestContext: requestContext,
         skipCache: skipCache,
       );
     } finally {
-      client.close();
+      await client.dispose();
     }
   }
 
@@ -107,6 +120,7 @@ class MetaLink {
     List<String> urls, {
     MetaLinkClientOptions options = const MetaLinkClientOptions(),
     CacheStore? cacheStore,
+    RequestContext? requestContext,
     bool skipCache = false,
     int concurrency = 4,
   }) async {
@@ -114,19 +128,24 @@ class MetaLink {
       throw ArgumentError.value(concurrency, 'concurrency', 'Must be >= 1.');
     }
 
+    final effectiveOptions = cacheStore == null
+        ? options.copyWith(cache: options.cache.copyWith(enabled: false))
+        : options;
+
     final client = MetaLinkClient(
-      options: options,
+      options: effectiveOptions,
       cacheStore: cacheStore,
     );
 
     try {
       return await client.extractBatch(
         urls,
+        requestContext: requestContext,
         skipCache: skipCache,
         concurrency: concurrency,
       );
     } finally {
-      client.close();
+      await client.dispose();
     }
   }
 }

@@ -14,8 +14,9 @@
 /// ### Filtered Schemes
 /// Non-HTTP schemes (`mailto:`, `javascript:`, `data:`, etc.) return `null`.
 class UrlNormalizer {
-  static final RegExp _absoluteSchemeRegex =
-      RegExp(r'^[a-zA-Z][a-zA-Z0-9+\-.]*://');
+  static final RegExp _absoluteSchemeRegex = RegExp(
+    r'^[a-zA-Z][a-zA-Z0-9+\-.]*://',
+  );
 
   static final List<String> _forbiddenSchemes = <String>[
     'mailto:',
@@ -112,8 +113,8 @@ class UrlNormalizer {
   static Uri normalizeForRequest(Uri input) {
     final noFrag = removeFragment(input);
 
-    final scheme =
-        (noFrag.scheme.isEmpty ? 'https' : noFrag.scheme).toLowerCase();
+    final scheme = (noFrag.scheme.isEmpty ? 'https' : noFrag.scheme)
+        .toLowerCase();
     final host = noFrag.host.toLowerCase();
     final path = noFrag.path.isEmpty ? '/' : noFrag.path;
 
@@ -124,12 +125,7 @@ class UrlNormalizer {
       port = null;
     }
 
-    return noFrag.replace(
-      scheme: scheme,
-      host: host,
-      path: path,
-      port: port,
-    );
+    return noFrag.replace(scheme: scheme, host: host, path: path, port: port);
   }
 
   /// Normalizes a URL for use as a cache key.
@@ -177,6 +173,16 @@ class UrlNormalizer {
       built = '$p$raw';
     }
 
-    return Uri.tryParse(built) ?? targetUrl;
+    final result = Uri.tryParse(built);
+    if (result == null ||
+        !result.hasScheme ||
+        result.host.isEmpty ||
+        (result.scheme.toLowerCase() != 'http' &&
+            result.scheme.toLowerCase() != 'https')) {
+      throw const FormatException(
+        'Proxy URL did not produce a valid HTTP(S) URI.',
+      );
+    }
+    return result;
   }
 }

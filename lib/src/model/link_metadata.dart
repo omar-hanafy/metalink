@@ -208,8 +208,10 @@ class LinkMetadata {
       keywords: json.getList<String>('keywords', defaultValue: []),
       oembed: json.tryParse('oembed', OEmbedData.fromJson),
       manifest: json.tryParse('manifest', WebAppManifestData.fromJson),
-      structuredData:
-          json.tryParse('structuredData', StructuredDataGraph.fromJson),
+      structuredData: json.tryParse(
+        'structuredData',
+        StructuredDataGraph.fromJson,
+      ),
     );
   }
 
