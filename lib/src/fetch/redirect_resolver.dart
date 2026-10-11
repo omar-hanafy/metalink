@@ -1,9 +1,9 @@
-import 'package:metalink/src/options.dart';
-import 'package:metalink/src/model/url_optimization.dart';
 import 'package:metalink/src/fetch/fetcher.dart';
+import 'package:metalink/src/model/url_optimization.dart';
 import 'package:metalink/src/network/request_context.dart';
 import 'package:metalink/src/network/request_engine.dart';
 import 'package:metalink/src/network/request_policy.dart';
+import 'package:metalink/src/options.dart';
 
 /// Resolves URL redirects to discover the final destination.
 ///
@@ -12,8 +12,8 @@ import 'package:metalink/src/network/request_policy.dart';
 /// when HEAD is not supported.
 ///
 /// ### When to Use
-/// Use via [MetaLinkClient.optimizeUrl] to resolve shortened URLs (bit.ly, t.co)
-/// or discover canonical destinations without full metadata extraction.
+/// Use via `MetaLinkClient.optimizeUrl` to resolve shortened URLs (bit.ly,
+/// t.co) or discover canonical destinations without full metadata extraction.
 ///
 /// ### Example
 /// ```dart
@@ -27,10 +27,21 @@ import 'package:metalink/src/network/request_policy.dart';
 /// ```
 class RedirectResolver {
   /// Creates a [RedirectResolver] with the given [Fetcher].
-  RedirectResolver({required Fetcher fetcher}) : _fetcher = fetcher;
+  RedirectResolver({required this._fetcher});
 
   final Fetcher _fetcher;
 
+  /// Follows redirects from [url] and reports the final destination.
+  ///
+  /// Each hop sends HEAD and falls back to a GET that reads no body when HEAD
+  /// fails or returns `405` or `501`. Every hop is subject to
+  /// [FetchOptions.requestPolicy], [FetchOptions.maxRedirects], and the
+  /// operation deadline. When [context] is `null`, a context bounded by
+  /// [FetchOptions.totalTimeout] is used.
+  ///
+  /// This method does not throw. A request failure is reported in
+  /// [UrlOptimizationResult.error], usually as a [RequestFailure], together
+  /// with the last URL reached.
   Future<UrlOptimizationResult> resolve(
     Uri url, {
     required FetchOptions options,

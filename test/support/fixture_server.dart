@@ -121,7 +121,7 @@ class FixtureServer {
   ) async {
     final filePath = path.join(_fixtureRoot, fixture.relativePath);
     final file = File(filePath);
-    if (!await file.exists()) {
+    if (!file.existsSync()) {
       return _respondStatus(request, 404, 'Missing fixture');
     }
 
@@ -139,7 +139,7 @@ class FixtureServer {
     }
 
     final file = File(assetPath);
-    if (!await file.exists()) {
+    if (!file.existsSync()) {
       return _respondStatus(request, 404, 'Missing asset');
     }
 

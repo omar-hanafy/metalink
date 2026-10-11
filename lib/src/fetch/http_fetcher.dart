@@ -8,6 +8,7 @@ import 'package:metalink/src/fetch/http_fetcher_capabilities_io.dart'
     if (dart.library.js_interop) 'package:metalink/src/fetch/http_fetcher_capabilities_web.dart'
     as platform_capabilities;
 import 'package:metalink/src/model/diagnostics.dart';
+import 'package:metalink/src/network/deadline_timer.dart';
 import 'package:metalink/src/options.dart';
 
 /// Default [Fetcher] implementation using the `http` package.
@@ -27,6 +28,12 @@ import 'package:metalink/src/options.dart';
 /// per-hop target validation, and MetaLink's cross-origin header stripping
 /// cannot be observed or enforced. Policies that require inspectable hops are
 /// rejected by the unified request engine before transport.
+///
+/// With redirects disabled on the web, through [FetchOptions.followRedirects]
+/// set to `false` or a [FetchOptions.maxRedirects] of `0`, the browser rejects
+/// any redirect response. It is then reported as a retryable transport error
+/// (`RequestFailureCode.transport`), not as `RequestFailureCode.redirectLimit`
+/// as on native platforms.
 ///
 /// ### Example
 /// ```dart
@@ -48,12 +55,12 @@ class HttpFetcher implements AbortableFetcher, CapabilityAwareFetcher {
   /// * [capabilities] - Optional truthful capability description for an
   ///   injected client or factory. Custom clients default to unknown
   ///   capabilities when this is omitted.
-  /// * [logSink] - Optional callback to receive internal log messages.
+  /// * `logSink` - Optional callback to receive internal log messages.
   HttpFetcher({
     http.Client? client,
     http.Client Function()? clientFactory,
     FetcherCapabilities? capabilities,
-    MetaLinkLogSink? logSink,
+    this._logSink,
   }) : assert(
          client == null || clientFactory == null,
          'client and clientFactory cannot both be provided',
@@ -71,8 +78,7 @@ class HttpFetcher implements AbortableFetcher, CapabilityAwareFetcher {
                        'Capabilities of the injected HTTP client are '
                        'unknown. Pass an explicit capability description when '
                        'the client guarantees abort and manual redirects.',
-                 )),
-       _logSink = logSink;
+                 ));
 
   static http.Client _createDefaultClient() => http.Client();
 
@@ -400,15 +406,10 @@ class _RequestAbortController {
     required this.timeout,
     Future<void>? externalTrigger,
   }) {
-    _timer = Timer(timeout, () => _abort(_AbortReason.timeout));
-    externalTrigger
-        ?.then<void>(
-          (_) => _abort(_AbortReason.cancellation),
-          onError: (Object _, StackTrace _) {
-            _abort(_AbortReason.cancellation);
-          },
-        )
-        .ignore();
+    _timer = startDeadlineTimer(timeout, () => _abort(_AbortReason.timeout));
+    if (externalTrigger != null) {
+      _externalRelay = _AbortSignalRelay(this).._listen(externalTrigger);
+    }
   }
 
   final Uri url;
@@ -417,6 +418,7 @@ class _RequestAbortController {
   final Completer<_AbortReason> _reason = Completer<_AbortReason>();
 
   Timer? _timer;
+  _AbortSignalRelay? _externalRelay;
   bool _active = true;
 
   Future<void> get trigger => _trigger.future;
@@ -446,11 +448,49 @@ class _RequestAbortController {
     _active = false;
     _timer?.cancel();
     _timer = null;
+    // The caller's trigger keeps its listener until it completes. Releasing
+    // the relay leaves that listener holding an empty relay instead of this
+    // controller and the response it guarded.
+    _externalRelay?.release();
+    _externalRelay = null;
+  }
+}
+
+/// Forwards a caller-owned abort trigger to one request's controller.
+///
+/// A [Future] cannot drop a listener before it completes, so a listener on a
+/// long-lived trigger outlives the request that registered it. The listener
+/// closures are created in [_listen] and capture only this relay, and
+/// [release] drops the controller when the request ends. A trigger that never
+/// completes therefore retains this small object rather than the controller
+/// and the response it guarded.
+final class _AbortSignalRelay {
+  _AbortSignalRelay(this._controller);
+
+  _RequestAbortController? _controller;
+
+  /// Treats completion of [trigger] with a value or an error as cancellation.
+  void _listen(Future<void> trigger) {
+    trigger
+        .then<void>(
+          (_) => _cancel(),
+          onError: (Object _, StackTrace _) => _cancel(),
+        )
+        .ignore();
+  }
+
+  void _cancel() {
+    _controller?._abort(_AbortReason.cancellation);
+  }
+
+  /// Detaches the controller; a later trigger completion does nothing.
+  void release() {
+    _controller = null;
   }
 }
 
 class _ReadResult {
-  const _ReadResult(this.bytes, this.truncated);
+  const _ReadResult(this.bytes, {required this.truncated});
 
   final List<int> bytes;
   final bool truncated;
@@ -466,11 +506,21 @@ Future<_ReadResult> _readStreamWithLimit(
   if (maxBytes <= 0) {
     // Do not read when maxBytes <= 0; cancel to free the connection.
     await _cancelStream(stream);
-    return const _ReadResult(<int>[], false);
+    return const _ReadResult(<int>[], truncated: false);
   }
 
-  final int hardLimit = maxBytes == 0 ? 0 : maxBytes + 1;
   final builder = BytesBuilder(copy: false);
+
+  // Reading one byte past maxBytes tells a body of exactly maxBytes apart from
+  // a truncated one. A limit too large to increment, such as the largest int,
+  // cannot be exceeded by any body, so read everything instead of overflowing.
+  final int hardLimit = maxBytes + 1;
+  if (hardLimit <= maxBytes) {
+    await for (final chunk in stream) {
+      builder.add(chunk);
+    }
+    return _ReadResult(builder.takeBytes(), truncated: false);
+  }
 
   int remaining = hardLimit;
   bool stoppedEarly = false;
@@ -502,13 +552,16 @@ Future<_ReadResult> _readStreamWithLimit(
   final bytes = builder.takeBytes();
 
   // If we stopped early due to the hard limit, we may have read maxBytes+1.
-  if (stoppedEarly && bytes.length >= hardLimit && hardLimit == maxBytes + 1) {
+  if (stoppedEarly && bytes.length >= hardLimit) {
     // We read one extra byte, which confirms truncation.
-    return _ReadResult(Uint8List.sublistView(bytes, 0, maxBytes), true);
+    return _ReadResult(
+      Uint8List.sublistView(bytes, 0, maxBytes),
+      truncated: true,
+    );
   }
 
   // Not truncated: stream ended or we never reached the hard limit.
-  return _ReadResult(bytes, false);
+  return _ReadResult(bytes, truncated: false);
 }
 
 /// Cancels a stream subscription as quickly as possible.

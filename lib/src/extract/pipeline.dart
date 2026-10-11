@@ -2,27 +2,26 @@ import 'dart:convert';
 
 import 'package:html/dom.dart';
 import 'package:html/parser.dart' as html_parser;
-
-import 'package:metalink/src/options.dart';
+import 'package:metalink/src/extract/candidate.dart';
+import 'package:metalink/src/extract/extractors/manifest_enricher.dart';
+import 'package:metalink/src/extract/extractors/oembed_enricher.dart';
+import 'package:metalink/src/extract/ranking.dart';
+import 'package:metalink/src/extract/url_resolver.dart';
 import 'package:metalink/src/fetch/fetcher.dart';
 import 'package:metalink/src/fetch/html_snippet_fetcher.dart';
 import 'package:metalink/src/model/diagnostics.dart';
 import 'package:metalink/src/model/errors.dart';
 import 'package:metalink/src/model/icon.dart';
 import 'package:metalink/src/model/link_metadata.dart';
-import 'package:metalink/src/model/media.dart';
 import 'package:metalink/src/model/manifest.dart';
+import 'package:metalink/src/model/media.dart';
 import 'package:metalink/src/model/oembed.dart';
 import 'package:metalink/src/model/raw_metadata.dart';
 import 'package:metalink/src/model/structured_data.dart';
 import 'package:metalink/src/network/request_context.dart';
+import 'package:metalink/src/options.dart';
+import 'package:metalink/src/util/html_utils.dart';
 import 'package:metalink/src/util/url_normalizer.dart';
-
-import 'package:metalink/src/extract/candidate.dart';
-import 'package:metalink/src/extract/extractors/manifest_enricher.dart';
-import 'package:metalink/src/extract/extractors/oembed_enricher.dart';
-import 'package:metalink/src/extract/ranking.dart';
-import 'package:metalink/src/extract/url_resolver.dart';
 
 /// Interface for metadata extractor stages in the pipeline.
 ///
@@ -87,6 +86,15 @@ class HtmlExtractContext {
   /// Utility for resolving relative URLs.
   final UrlResolver urlResolver;
 
+  /// The `<meta>` elements of [document], indexed once and shared by every
+  /// stage.
+  ///
+  /// Stages should read meta tags through this index rather than CSS
+  /// selectors so that `name`, `property`, and `http-equiv` keys match ASCII
+  /// case-insensitively and blank duplicates are skipped consistently. The
+  /// index is built on first access.
+  late final MetaTagIndex metaTags = MetaTagIndex.fromDocument(document);
+
   // Internal candidate buckets written by stages and read by the pipeline merger.
   final List<Candidate<String>> _title = <Candidate<String>>[];
   final List<Candidate<String>> _description = <Candidate<String>>[];
@@ -118,6 +126,15 @@ class HtmlExtractContext {
 
   // Public stage API for adding scored candidates and provenance hints.
 
+  /// Adds a title candidate.
+  ///
+  /// NUL characters are removed and whitespace runs are collapsed before the
+  /// value is stored; a value that is blank afterwards is ignored.
+  ///
+  /// [score] is ranked by the pipeline's [RankingPolicy]; with
+  /// [DefaultRankingPolicy] the highest score wins and ties keep the order in
+  /// which candidates were added. [evidence] is reported in provenance and
+  /// candidate decisions.
   void addTitle(
     String value, {
     required CandidateSource source,
@@ -131,6 +148,15 @@ class HtmlExtractContext {
     );
   }
 
+  /// Adds a description candidate.
+  ///
+  /// NUL characters are removed and whitespace runs are collapsed before the
+  /// value is stored; a value that is blank afterwards is ignored.
+  ///
+  /// [score] is ranked by the pipeline's [RankingPolicy]; with
+  /// [DefaultRankingPolicy] the highest score wins and ties keep the order in
+  /// which candidates were added. [evidence] is reported in provenance and
+  /// candidate decisions.
   void addDescription(
     String value, {
     required CandidateSource source,
@@ -144,6 +170,15 @@ class HtmlExtractContext {
     );
   }
 
+  /// Adds a site or publisher name candidate.
+  ///
+  /// NUL characters are removed and whitespace runs are collapsed before the
+  /// value is stored; a value that is blank afterwards is ignored.
+  ///
+  /// [score] is ranked by the pipeline's [RankingPolicy]; with
+  /// [DefaultRankingPolicy] the highest score wins and ties keep the order in
+  /// which candidates were added. [evidence] is reported in provenance and
+  /// candidate decisions.
   void addSiteName(
     String value, {
     required CandidateSource source,
@@ -157,6 +192,16 @@ class HtmlExtractContext {
     );
   }
 
+  /// Adds a locale or language candidate, such as `en_US` or `fr`.
+  ///
+  /// The value is not validated as a language tag. NUL characters are removed
+  /// and whitespace runs are collapsed before the value is stored; a value
+  /// that is blank afterwards is ignored.
+  ///
+  /// [score] is ranked by the pipeline's [RankingPolicy]; with
+  /// [DefaultRankingPolicy] the highest score wins and ties keep the order in
+  /// which candidates were added. [evidence] is reported in provenance and
+  /// candidate decisions.
   void addLocale(
     String value, {
     required CandidateSource source,
@@ -170,6 +215,16 @@ class HtmlExtractContext {
     );
   }
 
+  /// Adds a canonical URL candidate.
+  ///
+  /// A relative [value] resolves against [baseUrl]. The value is ignored unless
+  /// it becomes an absolute HTTP(S) URL with a host, and any fragment is
+  /// removed.
+  ///
+  /// [score] is ranked by the pipeline's [RankingPolicy]; with
+  /// [DefaultRankingPolicy] the highest score wins and ties keep the order in
+  /// which candidates were added. [evidence] is reported in provenance and
+  /// candidate decisions.
   void addCanonicalUrl(
     Uri value, {
     required CandidateSource source,
@@ -183,6 +238,18 @@ class HtmlExtractContext {
     );
   }
 
+  /// Adds one keyword candidate.
+  ///
+  /// Call once per keyword. The pipeline keeps the highest-ranked spelling of
+  /// each keyword, compared case-insensitively, up to 25 keywords.
+  ///
+  /// NUL characters are removed and whitespace runs are collapsed before the
+  /// value is stored; a value that is blank afterwards is ignored.
+  ///
+  /// [score] is ranked by the pipeline's [RankingPolicy]; with
+  /// [DefaultRankingPolicy] the highest score wins and ties keep the order in
+  /// which candidates were added. [evidence] is reported in provenance and
+  /// candidate decisions.
   void addKeyword(
     String value, {
     required CandidateSource source,
@@ -196,6 +263,15 @@ class HtmlExtractContext {
     );
   }
 
+  /// Adds an author candidate.
+  ///
+  /// NUL characters are removed and whitespace runs are collapsed before the
+  /// value is stored; a value that is blank afterwards is ignored.
+  ///
+  /// [score] is ranked by the pipeline's [RankingPolicy]; with
+  /// [DefaultRankingPolicy] the highest score wins and ties keep the order in
+  /// which candidates were added. [evidence] is reported in provenance and
+  /// candidate decisions.
   void addAuthor(
     String value, {
     required CandidateSource source,
@@ -209,6 +285,12 @@ class HtmlExtractContext {
     );
   }
 
+  /// Adds a publication time candidate, stored in UTC.
+  ///
+  /// [score] is ranked by the pipeline's [RankingPolicy]; with
+  /// [DefaultRankingPolicy] the highest score wins and ties keep the order in
+  /// which candidates were added. [evidence] is reported in provenance and
+  /// candidate decisions.
   void addPublishedAt(
     DateTime value, {
     required CandidateSource source,
@@ -225,6 +307,12 @@ class HtmlExtractContext {
     );
   }
 
+  /// Adds a last-modified time candidate, stored in UTC.
+  ///
+  /// [score] is ranked by the pipeline's [RankingPolicy]; with
+  /// [DefaultRankingPolicy] the highest score wins and ties keep the order in
+  /// which candidates were added. [evidence] is reported in provenance and
+  /// candidate decisions.
   void addModifiedAt(
     DateTime value, {
     required CandidateSource source,
@@ -241,6 +329,22 @@ class HtmlExtractContext {
     );
   }
 
+  /// Adds an image candidate that has only a URL.
+  ///
+  /// Use [addImageCandidate] when dimensions, MIME type, or alt text are
+  /// known.
+  ///
+  /// A relative [value] resolves against [baseUrl]. The value is ignored unless
+  /// it becomes an absolute HTTP(S) URL with a host, and any fragment is
+  /// removed.
+  ///
+  /// Items with the same URL are merged after ranking: the highest-ranked
+  /// occurrence is kept and its missing attributes are filled from the others.
+  ///
+  /// [score] is ranked by the pipeline's [RankingPolicy]; with
+  /// [DefaultRankingPolicy] the highest score wins and ties keep the order in
+  /// which candidates were added. [evidence] is reported in provenance and
+  /// candidate decisions.
   void addImageUri(
     Uri value, {
     required CandidateSource source,
@@ -259,6 +363,19 @@ class HtmlExtractContext {
     );
   }
 
+  /// Adds an image candidate with its declared attributes.
+  ///
+  /// The URL of [value] is resolved against [baseUrl]; the candidate is ignored
+  /// unless it becomes an absolute HTTP(S) URL with a host, and any fragment is
+  /// removed. Other attributes are kept as given.
+  ///
+  /// Items with the same URL are merged after ranking: the highest-ranked
+  /// occurrence is kept and its missing attributes are filled from the others.
+  ///
+  /// [score] is ranked by the pipeline's [RankingPolicy]; with
+  /// [DefaultRankingPolicy] the highest score wins and ties keep the order in
+  /// which candidates were added. [evidence] is reported in provenance and
+  /// candidate decisions.
   void addImageCandidate(
     ImageCandidate value, {
     required CandidateSource source,
@@ -280,6 +397,20 @@ class HtmlExtractContext {
     );
   }
 
+  /// Adds an icon candidate with its optional `rel`, `sizes`, and `type`
+  /// hints.
+  ///
+  /// A relative [value] resolves against [baseUrl]. The value is ignored unless
+  /// it becomes an absolute HTTP(S) URL with a host, and any fragment is
+  /// removed.
+  ///
+  /// Items with the same URL are merged after ranking: the highest-ranked
+  /// occurrence is kept and its missing attributes are filled from the others.
+  ///
+  /// [score] is ranked by the pipeline's [RankingPolicy]; with
+  /// [DefaultRankingPolicy] the highest score wins and ties keep the order in
+  /// which candidates were added. [evidence] is reported in provenance and
+  /// candidate decisions.
   void addIconUri(
     Uri value, {
     String? rel,
@@ -297,6 +428,21 @@ class HtmlExtractContext {
     );
   }
 
+  /// Adds a video candidate that has only a URL.
+  ///
+  /// Use [addVideoCandidate] when dimensions or a MIME type are known.
+  ///
+  /// A relative [value] resolves against [baseUrl]. The value is ignored unless
+  /// it becomes an absolute HTTP(S) URL with a host, and any fragment is
+  /// removed.
+  ///
+  /// Items with the same URL are merged after ranking: the highest-ranked
+  /// occurrence is kept and its missing attributes are filled from the others.
+  ///
+  /// [score] is ranked by the pipeline's [RankingPolicy]; with
+  /// [DefaultRankingPolicy] the highest score wins and ties keep the order in
+  /// which candidates were added. [evidence] is reported in provenance and
+  /// candidate decisions.
   void addVideoUri(
     Uri value, {
     required CandidateSource source,
@@ -313,6 +459,19 @@ class HtmlExtractContext {
     );
   }
 
+  /// Adds a video candidate with its declared dimensions and MIME type.
+  ///
+  /// The URL of [value] is resolved against [baseUrl]; the candidate is ignored
+  /// unless it becomes an absolute HTTP(S) URL with a host, and any fragment is
+  /// removed.
+  ///
+  /// Items with the same URL are merged after ranking: the highest-ranked
+  /// occurrence is kept and its missing attributes are filled from the others.
+  ///
+  /// [score] is ranked by the pipeline's [RankingPolicy]; with
+  /// [DefaultRankingPolicy] the highest score wins and ties keep the order in
+  /// which candidates were added. [evidence] is reported in provenance and
+  /// candidate decisions.
   void addVideoCandidate(
     VideoCandidate value, {
     required CandidateSource source,
@@ -336,6 +495,21 @@ class HtmlExtractContext {
     );
   }
 
+  /// Adds an audio candidate that has only a URL.
+  ///
+  /// Use [addAudioCandidate] when a MIME type is known.
+  ///
+  /// A relative [value] resolves against [baseUrl]. The value is ignored unless
+  /// it becomes an absolute HTTP(S) URL with a host, and any fragment is
+  /// removed.
+  ///
+  /// Items with the same URL are merged after ranking: the highest-ranked
+  /// occurrence is kept and its missing attributes are filled from the others.
+  ///
+  /// [score] is ranked by the pipeline's [RankingPolicy]; with
+  /// [DefaultRankingPolicy] the highest score wins and ties keep the order in
+  /// which candidates were added. [evidence] is reported in provenance and
+  /// candidate decisions.
   void addAudioUri(
     Uri value, {
     required CandidateSource source,
@@ -352,6 +526,19 @@ class HtmlExtractContext {
     );
   }
 
+  /// Adds an audio candidate with its declared MIME type.
+  ///
+  /// The URL of [value] is resolved against [baseUrl]; the candidate is ignored
+  /// unless it becomes an absolute HTTP(S) URL with a host, and any fragment is
+  /// removed.
+  ///
+  /// Items with the same URL are merged after ranking: the highest-ranked
+  /// occurrence is kept and its missing attributes are filled from the others.
+  ///
+  /// [score] is ranked by the pipeline's [RankingPolicy]; with
+  /// [DefaultRankingPolicy] the highest score wins and ties keep the order in
+  /// which candidates were added. [evidence] is reported in provenance and
+  /// candidate decisions.
   void addAudioCandidate(
     AudioCandidate value, {
     required CandidateSource source,
@@ -373,6 +560,18 @@ class HtmlExtractContext {
   /// Records a non-fatal extractor diagnostic without aborting other stages.
   void addWarning(MetaLinkWarning warning) => _warnings.add(warning);
 
+  /// Adds a discovered oEmbed endpoint candidate.
+  ///
+  /// When [ExtractOptions.enableOEmbed] is set, [ExtractPipeline.run] fetches
+  /// only the highest-ranked endpoint after all stages finish and feeds its
+  /// title, author, provider, and thumbnail back as candidates.
+  /// [ExtractPipeline.runLocal] never fetches it. The endpoint URL must be an
+  /// absolute HTTP(S) URL with a host, or the candidate is ignored.
+  ///
+  /// [score] is ranked by the pipeline's [RankingPolicy]; with
+  /// [DefaultRankingPolicy] the highest score wins and ties keep the order in
+  /// which candidates were added. [evidence] is reported in provenance and
+  /// candidate decisions.
   void addOEmbedEndpoint(
     OEmbedEndpoint endpoint, {
     required CandidateSource source,
@@ -391,6 +590,18 @@ class HtmlExtractContext {
     );
   }
 
+  /// Adds a web app manifest URL candidate.
+  ///
+  /// When [ExtractOptions.enableManifest] is set, [ExtractPipeline.run]
+  /// fetches only the highest-ranked manifest after all stages finish and
+  /// feeds its name, short name, and icons back as candidates.
+  /// [ExtractPipeline.runLocal] never fetches it. The URL must be an absolute
+  /// HTTP(S) URL with a host, or the candidate is ignored.
+  ///
+  /// [score] is ranked by the pipeline's [RankingPolicy]; with
+  /// [DefaultRankingPolicy] the highest score wins and ties keep the order in
+  /// which candidates were added. [evidence] is reported in provenance and
+  /// candidate decisions.
   void addManifestUrl(
     Uri manifestUrl, {
     required CandidateSource source,
@@ -404,6 +615,16 @@ class HtmlExtractContext {
     );
   }
 
+  /// Adds a [LinkKind] candidate.
+  ///
+  /// Despite its name this does not overwrite earlier calls; every call adds a
+  /// competing candidate. A winning [LinkKind.unknown] is reported without
+  /// field provenance.
+  ///
+  /// [score] is ranked by the pipeline's [RankingPolicy]; with
+  /// [DefaultRankingPolicy] the highest score wins and ties keep the order in
+  /// which candidates were added. [evidence] is reported in provenance and
+  /// candidate decisions.
   void setKind(
     LinkKind kind, {
     required CandidateSource source,
@@ -415,6 +636,15 @@ class HtmlExtractContext {
     );
   }
 
+  /// Adds a structured data graph candidate.
+  ///
+  /// Like [setKind], every call adds a competing candidate; only the
+  /// highest-ranked graph is returned.
+  ///
+  /// [score] is ranked by the pipeline's [RankingPolicy]; with
+  /// [DefaultRankingPolicy] the highest score wins and ties keep the order in
+  /// which candidates were added. [evidence] is reported in provenance and
+  /// candidate decisions.
   void setStructuredData(
     StructuredDataGraph graph, {
     required CandidateSource source,
@@ -512,23 +742,33 @@ class ExtractPipeline {
   ///
   /// ### Parameters
   /// * [stages] - The list of extractor stages to run (in order).
-  /// * [urlResolver] - Utility for resolving relative URLs.
-  /// * [logSink] - Optional callback for internal logging.
+  /// * `urlResolver` - Utility for resolving relative URLs.
+  /// * `logSink` - Optional callback for internal logging.
   ExtractPipeline({
     required List<HtmlMetadataExtractorStage> stages,
-    UrlResolver urlResolver = const UrlResolver(),
-    RankingPolicy rankingPolicy = const DefaultRankingPolicy(),
-    MetaLinkLogSink? logSink,
-  }) : _stages = List<HtmlMetadataExtractorStage>.unmodifiable(stages),
-       _urlResolver = urlResolver,
-       _rankingPolicy = rankingPolicy,
-       _logSink = logSink;
+    this._urlResolver = const UrlResolver(),
+    this._rankingPolicy = const DefaultRankingPolicy(),
+    this._logSink,
+  }) : _stages = List<HtmlMetadataExtractorStage>.unmodifiable(stages);
 
   final List<HtmlMetadataExtractorStage> _stages;
   final UrlResolver _urlResolver;
   final RankingPolicy _rankingPolicy;
   final MetaLinkLogSink? _logSink;
 
+  /// Parses [page], runs every stage, optionally enriches the result over the
+  /// network, and ranks all candidates into a [PipelineOutput].
+  ///
+  /// Remote oEmbed and manifest enrichment run only when enabled in
+  /// [extractOptions] and a stage discovered an endpoint. Those requests use
+  /// [fetcher] with [fetchOptions] and share [requestContext] for deadlines and
+  /// cancellation. Use [runLocal] to guarantee that no request is made.
+  ///
+  /// The returned future does not complete with an error for extraction
+  /// problems. A body that cannot be decoded or parsed yields empty metadata
+  /// and an entry in [PipelineOutput.errors]. A stage that throws, or an
+  /// enrichment that fails, adds an entry to [PipelineOutput.warnings] while
+  /// the other stages still contribute.
   Future<PipelineOutput> run({
     required HtmlFetchResult page,
     required Fetcher fetcher,
@@ -1058,17 +1298,16 @@ class ExtractPipeline {
     }
   }
 
+  // Uses the first `<base href>` only when it yields an absolute HTTP(S) URL
+  // with a host. A hostless base such as `https:` or `https:///` would make
+  // every relative asset resolve hostless and be dropped, so it falls back to
+  // the document URL as browsers do for an unusable base. The URL resolver
+  // applies the same WHATWG tab, newline, and control-character cleanup used
+  // for every other URL field.
   Uri _detectBaseUrl(Document doc, Uri fallback) {
     try {
-      final baseEl = doc.querySelector('base[href]');
-      final href = baseEl?.attributes['href']?.trim();
-      if (href == null || href.isEmpty) return fallback;
-      final u = Uri.tryParse(href);
-      if (u == null) return fallback;
-      final resolved = u.hasScheme ? u : fallback.resolveUri(u);
-      final scheme = resolved.scheme.toLowerCase();
-      if (scheme != 'http' && scheme != 'https') return fallback;
-      return resolved;
+      final href = doc.querySelector('base[href]')?.attributes['href'];
+      return _urlResolver.resolve(fallback, href) ?? fallback;
     } catch (_) {
       return fallback;
     }

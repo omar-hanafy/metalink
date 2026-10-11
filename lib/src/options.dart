@@ -258,12 +258,24 @@ class CacheOptions {
   /// Whether caching is enabled for this request.
   ///
   /// If `false`, the [CacheStore] is ignored for both read and write operations.
+  /// If `true` for a request on a `MetaLinkClient` that has no store, the
+  /// client creates a `MemoryCacheStore` on first use and closes it on
+  /// dispose.
   final bool enabled;
 
-  /// The time-to-live for cached entries created by this request.
+  /// The lifetime of cache entries this request writes and the maximum age of
+  /// entries it accepts.
   ///
-  /// If a cached entry is older than this duration, it is considered expired
-  /// and ignored (treated as a cache miss).
+  /// A positive value is stored with each new entry. On read, an entry older
+  /// than this value is treated as expired: the request ignores it, asks the
+  /// store to remove it, and fetches again.
+  ///
+  /// A zero or negative value means entries use the store's default lifetime,
+  /// matching the [CacheLifetime.storeDefault] convention for a nonpositive
+  /// legacy [CacheEntry.ttlMs], and the request applies no age limit of its
+  /// own. A store that `MetaLinkClient` creates uses the client's positive
+  /// `ttl` as that default, or 4 hours when the client's `ttl` is not
+  /// positive. An injected store applies its own configured default.
   ///
   /// Defaults to 4 hours.
   final Duration ttl;

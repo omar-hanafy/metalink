@@ -1,7 +1,7 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:http/http.dart' as http;
-
 import 'package:metalink/src/cache/cache_key.dart';
 import 'package:metalink/src/cache/cache_store.dart';
 import 'package:metalink/src/cache/memory_cache_store.dart';
@@ -18,10 +18,13 @@ import 'package:metalink/src/fetch/redirect_resolver.dart';
 import 'package:metalink/src/model/diagnostics.dart';
 import 'package:metalink/src/model/errors.dart';
 import 'package:metalink/src/model/link_metadata.dart';
+import 'package:metalink/src/model/manifest.dart';
 import 'package:metalink/src/model/raw_metadata.dart';
+import 'package:metalink/src/model/structured_data.dart';
 import 'package:metalink/src/model/url_optimization.dart';
-import 'package:metalink/src/network/request_engine.dart';
+import 'package:metalink/src/network/deadline_timer.dart';
 import 'package:metalink/src/network/request_context.dart';
+import 'package:metalink/src/network/request_engine.dart';
 import 'package:metalink/src/network/request_policy.dart';
 import 'package:metalink/src/options.dart';
 import 'package:metalink/src/result.dart';
@@ -35,10 +38,11 @@ import 'package:metalink/src/util/url_normalizer.dart';
 /// ### When to Use
 /// * Use [MetaLinkClient] for production applications where you extract metadata
 ///   from multiple URLs over time. The shared HTTP client improves performance.
-/// * For simple one-off extractions, prefer the static [MetaLink.extract] helper instead.
+/// * For simple one-off extractions, prefer the static `MetaLink.extract` helper instead.
 ///
 /// ### Resource Management
-/// * The client owns its internal HTTP client unless you inject one via [httpClient].
+/// * The client owns its internal HTTP client unless you inject one through the
+///   `httpClient` constructor parameter.
 /// * Always await [dispose] when done to release network connections and cache resources.
 /// * Using a `try/finally` block ensures cleanup even if extraction fails.
 ///
@@ -60,7 +64,7 @@ import 'package:metalink/src/util/url_normalizer.dart';
 /// ```
 ///
 /// See also:
-/// * [MetaLink] for static convenience methods.
+/// * `MetaLink` for static convenience methods.
 /// * [MetaLinkClientOptions] for configuration details.
 /// * [ExtractionResult] for the structure of returned data.
 class MetaLinkClient {
@@ -74,8 +78,11 @@ class MetaLinkClient {
   ///   selected request policy requires inspectable redirect hops.
   /// * [fetcher] - An optional custom [Fetcher] implementation. If provided,
   ///   it takes precedence over [httpClient].
-  /// * [cacheStore] - An optional cache store. If `null` and caching is enabled,
-  ///   a [MemoryCacheStore] is created automatically.
+  /// * [cacheStore] - An optional cache store that stays caller-owned. If
+  ///   `null`, the client creates and owns a [MemoryCacheStore] when caching
+  ///   is first enabled: at construction when [options] enable it, or on the
+  ///   first request whose [CacheOptions] enable it. The client closes that
+  ///   store on [dispose]. [CacheOptions.ttl] describes its default lifetime.
   /// * [options] - Configuration for fetch, extract, and cache behavior.
   /// * [logSink] - An optional callback for receiving log messages.
   MetaLinkClient({
@@ -101,7 +108,7 @@ class MetaLinkClient {
        _cacheStore =
            cacheStore ??
            (options.cache.enabled
-               ? MemoryCacheStore(defaultTtl: options.cache.ttl)
+               ? _createOwnedCacheStore(options.cache)
                : null),
        _ownsCacheStore = cacheStore == null && options.cache.enabled {
     _htmlSnippetFetcher = HtmlSnippetFetcher(fetcher: _fetcher);
@@ -129,8 +136,10 @@ class MetaLinkClient {
   final Fetcher _fetcher;
   final bool _ownsFetcher;
 
-  final CacheStore? _cacheStore;
-  final bool _ownsCacheStore;
+  // Not final: a client built without a store creates one on demand when a
+  // request enables caching (see _cacheStoreForRequest).
+  CacheStore? _cacheStore;
+  bool _ownsCacheStore;
 
   late final HtmlSnippetFetcher _htmlSnippetFetcher;
   late final RedirectResolver _redirectResolver;
@@ -138,7 +147,7 @@ class MetaLinkClient {
 
   bool _closed = false;
   Future<void>? _disposeFuture;
-  final Map<String, Future<ExtractionResult<LinkMetadata>>> _inFlight = {};
+  final Map<String, _InFlightExtraction> _inFlight = {};
   final Set<Future<void>> _activeOperations = <Future<void>>{};
 
   /// Extracts metadata from a single URL.
@@ -156,7 +165,29 @@ class MetaLinkClient {
   /// * [fetchOptions] - Overrides [MetaLinkClientOptions.fetch] for this request.
   /// * [extractOptions] - Overrides [MetaLinkClientOptions.extract] for this request.
   /// * [cacheOptions] - Overrides [MetaLinkClientOptions.cache] for this request.
+  /// * [requestContext] - Optional caller-owned deadline or cancellation signal.
   /// * [skipCache] - If `true`, bypasses the cache for this request only.
+  ///
+  /// ### Concurrent Calls
+  /// Calls without a [requestContext] that use the same URL and options while
+  /// an earlier call is still running share its network work. When calls
+  /// share work, each of them, including the first, receives its own copy of
+  /// the result, down to the lists and maps nested in structured data,
+  /// manifest icons, item provenance, and fetch redirects. Editing any list
+  /// or map of one call's result therefore never affects another call. A call
+  /// that shares with no other call receives the result without copying.
+  ///
+  /// The joining call's own request policy must still admit the URL, as on a
+  /// cache hit. A joining call retries on its own, within its own
+  /// `totalTimeout`, when the shared work was rejected by a different
+  /// [RequestPolicy] object or ran out of its complete `totalTimeout`. It
+  /// shares any other failure, including a per-attempt `timeout` and a
+  /// rejection by the same policy object. Policies are compared by identity
+  /// because their validators cannot be compared. [RequestPolicy.secure]
+  /// called without arguments always returns the same object, so callers that
+  /// each pass `RequestPolicy.secure()` share a rejection instead of each
+  /// sending the request again. A custom policy should likewise be created
+  /// once and reused, or each joining call retries a rejection once.
   ///
   /// ### Returns
   /// An [ExtractionResult] containing:
@@ -231,25 +262,251 @@ class MetaLinkClient {
       skipCache: skipCache,
     );
     final existing = _inFlight[inFlightKey];
-    if (existing != null) return existing;
+    if (existing != null) {
+      // Counted before any await, so the first caller sees this call when it
+      // decides whether its result must be copied.
+      existing.joiners++;
+      return _trackOperation(
+        _joinInFlight(
+          existing,
+          url: url,
+          originalUrl: parsed,
+          fetchOptions: fOpt,
+          extractOptions: eOpt,
+          cacheOptions: cOpt,
+          skipCache: skipCache,
+        ),
+      );
+    }
 
-    final future = _extractOnce(
-      url,
-      fetchOptions: fOpt,
-      extractOptions: eOpt,
-      cacheOptions: cOpt,
-      requestContext: null,
-      skipCache: skipCache,
+    final operation = _InFlightExtraction.start(
+      () => _extractOnce(
+        url,
+        fetchOptions: fOpt,
+        extractOptions: eOpt,
+        cacheOptions: cOpt,
+        requestContext: null,
+        skipCache: skipCache,
+      ),
+      totalTimeout: fOpt.totalTimeout,
+      requestPolicy: fOpt.requestPolicy,
     );
-    _inFlight[inFlightKey] = future;
+    _inFlight[inFlightKey] = operation;
 
     try {
-      return await future;
+      final shared = await operation.result;
+      // Reading the joiner count here and removing the entry in `finally` run
+      // in one synchronous step, so no call can join in between. A call that
+      // joined earlier has already been counted. Without joiners, the result
+      // reaches only this caller and needs no copy. With joiners, the shared
+      // result stays pristine because every caller, this one included,
+      // receives its own copy.
+      return operation.joiners == 0 ? shared : _copyForCaller(shared);
     } finally {
-      if (identical(_inFlight[inFlightKey], future)) {
+      if (identical(_inFlight[inFlightKey], operation)) {
         _inFlight.remove(inFlightKey);
       }
     }
+  }
+
+  /// Shares an identical in-flight extraction with a later caller.
+  ///
+  /// The joining caller's own request policy must admit the target before it
+  /// may see another caller's result, exactly as a cache hit is re-validated:
+  /// policies that keep a default `cachePartition` share an in-flight
+  /// signature while admitting different targets.
+  Future<ExtractionResult<LinkMetadata>> _joinInFlight(
+    _InFlightExtraction leader, {
+    required String url,
+    required Uri originalUrl,
+    required FetchOptions fetchOptions,
+    required ExtractOptions extractOptions,
+    required CacheOptions cacheOptions,
+    required bool skipCache,
+  }) async {
+    final totalSw = Stopwatch()..start();
+    // The joining caller's lifetime starts now, as it would for a call that
+    // was not coalesced.
+    final joinerContext = RequestContext.forOperation(
+      totalTimeout: fetchOptions.totalTimeout,
+    );
+    final requestUrl = UrlNormalizer.normalizeForRequest(originalUrl);
+
+    final policyFailure = await _validateInitialRequestPolicy(
+      policy: fetchOptions.requestPolicy,
+      requestUrl: requestUrl,
+      context: joinerContext,
+    );
+    if (policyFailure != null) {
+      totalSw.stop();
+      return _requestFailureExtractionResult(
+        originalUrl: originalUrl,
+        requestUrl: requestUrl,
+        totalTime: totalSw.elapsed,
+        failure: policyFailure,
+        warnings: <MetaLinkWarning>[
+          if (skipCache && cacheOptions.enabled && _cacheStore != null)
+            _cacheBypassedWarning(originalUrl),
+        ],
+      );
+    }
+
+    final shared = await leader.result;
+    // Retry without coalescing, bounded by this caller's own deadline, only
+    // when the shared failure need not apply to this caller:
+    // * a different request policy rejected the target. This caller's own
+    //   policy has just admitted it. The same policy object, such as the
+    //   shared `RequestPolicy.secure()` instance, would reject it again, for
+    //   example on a redirect hop, so its failure is shared.
+    // * the shared operation ran out of its complete deadline, which started
+    //   with the first caller and so ended before this caller's own would.
+    // Any other failure, such as a per-attempt timeout, is shared: retrying
+    // every joiner at once would double their wait and stampede the host.
+    final rejectedByLeaderPolicy =
+        !identical(fetchOptions.requestPolicy, leader.requestPolicy) &&
+        shared.errors.any(
+          (error) => error.reason == MetaLinkErrorReason.policyRejected,
+        );
+    final ranOutOfSharedDeadline =
+        leader.exhaustedTotalTimeout &&
+        shared.errors.any((error) => error.code == MetaLinkErrorCode.timeout);
+    if ((rejectedByLeaderPolicy || ranOutOfSharedDeadline) &&
+        !joinerContext.isExpired &&
+        !_closed) {
+      return extract(
+        url,
+        fetchOptions: fetchOptions,
+        extractOptions: extractOptions,
+        cacheOptions: cacheOptions,
+        requestContext: joinerContext,
+        skipCache: skipCache,
+      );
+    }
+    // The first caller also receives a copy, because this call was counted
+    // in `joiners` before the shared result completed.
+    return _copyForCaller(shared);
+  }
+
+  /// A copy of [result] whose mutable parts one caller owns.
+  ///
+  /// Coalesced callers would otherwise share the leader's mutable lists and
+  /// maps, so one caller sorting `metadata.images` in place, for example,
+  /// would reorder every other caller's result. Every list and map reachable
+  /// from the result is copied:
+  /// * the result's warnings and errors, and the raw metadata's collections;
+  /// * the metadata's lists, its manifest's icons, and its structured data,
+  ///   whose nodes are copied in depth by [_copyStructuredDataNodes];
+  /// * the diagnostics' maps and lists, each item provenance's contributors,
+  ///   and the fetch diagnostics' redirects.
+  ///
+  /// The copies are growable. Every other object reachable from a result is
+  /// immutable and is shared, except error and warning causes, which are
+  /// opaque objects that are passed through as they are.
+  ExtractionResult<LinkMetadata> _copyForCaller(
+    ExtractionResult<LinkMetadata> result,
+  ) {
+    final raw = result.raw;
+    return ExtractionResult<LinkMetadata>(
+      metadata: _copyMetadata(result.metadata),
+      diagnostics: _copyDiagnostics(result.diagnostics),
+      raw: raw == null
+          ? null
+          : RawMetadata(
+              meta: <String, List<String>>{
+                for (final entry in raw.meta.entries)
+                  entry.key: List<String>.of(entry.value),
+              },
+              links: List<RawLinkTag>.of(raw.links),
+            ),
+      warnings: List<MetaLinkWarning>.of(result.warnings),
+      errors: List<MetaLinkError>.of(result.errors),
+      status: result.status,
+      completeness: result.completeness,
+    );
+  }
+
+  /// A copy of [input] that shares no list or map with it.
+  ///
+  /// Every [LinkMetadata] field must be carried over here.
+  LinkMetadata _copyMetadata(LinkMetadata input) {
+    final manifest = input.manifest;
+    final structuredData = input.structuredData;
+    return LinkMetadata(
+      originalUrl: input.originalUrl,
+      resolvedUrl: input.resolvedUrl,
+      canonicalUrl: input.canonicalUrl,
+      title: input.title,
+      description: input.description,
+      siteName: input.siteName,
+      locale: input.locale,
+      kind: input.kind,
+      images: List.of(input.images),
+      icons: List.of(input.icons),
+      videos: List.of(input.videos),
+      audios: List.of(input.audios),
+      publishedAt: input.publishedAt,
+      modifiedAt: input.modifiedAt,
+      author: input.author,
+      keywords: List.of(input.keywords),
+      oembed: input.oembed,
+      manifest: manifest == null
+          ? null
+          : WebAppManifestData(
+              manifestUrl: manifest.manifestUrl,
+              name: manifest.name,
+              shortName: manifest.shortName,
+              startUrl: manifest.startUrl,
+              display: manifest.display,
+              backgroundColor: manifest.backgroundColor,
+              themeColor: manifest.themeColor,
+              icons: List<ManifestIcon>.of(manifest.icons),
+            ),
+      structuredData: structuredData == null
+          ? null
+          : StructuredDataGraph(
+              nodes: _copyStructuredDataNodes(structuredData.nodes),
+            ),
+    );
+  }
+
+  ExtractionDiagnostics _copyDiagnostics(ExtractionDiagnostics diagnostics) {
+    final fetch = diagnostics.fetch;
+    return ExtractionDiagnostics(
+      cacheHit: diagnostics.cacheHit,
+      totalTime: diagnostics.totalTime,
+      fetch: fetch == null
+          ? null
+          : FetchDiagnostics(
+              requestedUrl: fetch.requestedUrl,
+              finalUrl: fetch.finalUrl,
+              statusCode: fetch.statusCode,
+              redirects: List<RedirectHop>.of(fetch.redirects),
+              bytesRead: fetch.bytesRead,
+              truncated: fetch.truncated,
+              detectedCharset: fetch.detectedCharset,
+              charsetSource: fetch.charsetSource,
+              duration: fetch.duration,
+            ),
+      provenanceAvailable: diagnostics.provenanceAvailable,
+      fieldProvenance: Map<MetaField, FieldProvenance>.of(
+        diagnostics.fieldProvenance,
+      ),
+      itemProvenance: <MetaField, List<ItemProvenance>>{
+        for (final entry in diagnostics.itemProvenance.entries)
+          entry.key: <ItemProvenance>[
+            for (final item in entry.value)
+              ItemProvenance(
+                itemKey: item.itemKey,
+                provenance: item.provenance,
+                contributors: List<FieldProvenance>.of(item.contributors),
+              ),
+          ],
+      },
+      candidateDecisions: <MetaField, List<CandidateDecision>>{
+        for (final entry in diagnostics.candidateDecisions.entries)
+          entry.key: List<CandidateDecision>.of(entry.value),
+      },
+    );
   }
 
   Future<ExtractionResult<LinkMetadata>> _extractOnce(
@@ -324,16 +581,12 @@ class MetaLinkClient {
       ),
     );
 
-    final cacheEnabled =
-        !skipCache && cOpt.enabled && _cacheStore != null && !_closed;
-    if (skipCache && cOpt.enabled && _cacheStore != null) {
-      warnings.add(
-        MetaLinkWarning(
-          code: MetaLinkWarningCode.cacheBypassed,
-          message: 'Cache was bypassed for this request.',
-          uri: originalUrl,
-        ),
-      );
+    // Resolve the store before the first await: the client is known to be
+    // open here, so a store created on demand is always visible to dispose().
+    final cacheStore = cOpt.enabled ? _cacheStoreForRequest() : null;
+    final cacheEnabled = !skipCache && cacheStore != null;
+    if (skipCache && cacheStore != null) {
+      warnings.add(_cacheBypassedWarning(originalUrl));
     }
 
     if (cacheEnabled) {
@@ -355,7 +608,7 @@ class MetaLinkClient {
       CacheReadResult read;
       try {
         read = await _raceWithRequestLifetime(
-          _safeCacheRead(_cacheStore, cacheKey),
+          _safeCacheRead(cacheStore, cacheKey),
           context: networkContext,
           requestUrl: requestUrl,
         );
@@ -398,7 +651,7 @@ class MetaLinkClient {
 
         if (expiredByStoredPolicy || expiredByRequestPolicy) {
           // Best-effort cleanup so cache expiry does not block the success path.
-          unawaited(_deleteCacheEntryBestEffort(_cacheStore, cacheKey));
+          unawaited(_deleteCacheEntryBestEffort(cacheStore, cacheKey));
         } else if (entry.kind == cOpt.payloadKind) {
           final fromCache = _tryBuildResultFromCacheEntry(
             entry: entry,
@@ -443,7 +696,7 @@ class MetaLinkClient {
             );
           } else {
             // Cached payload corrupt or incompatible; attempt delete and continue.
-            unawaited(_deleteCacheEntryBestEffort(_cacheStore, cacheKey));
+            unawaited(_deleteCacheEntryBestEffort(cacheStore, cacheKey));
           }
         }
       }
@@ -684,7 +937,7 @@ class MetaLinkClient {
       );
 
       final write = await _safeCacheWriteWithinLifetime(
-        _cacheStore,
+        cacheStore,
         cacheKey,
         entry,
         context: networkContext,
@@ -811,7 +1064,7 @@ class MetaLinkClient {
             errors: [
               MetaLinkError(
                 code: MetaLinkErrorCode.invalidUrl,
-                message: e.message ?? 'Invalid URL input: "$u"',
+                message: _argumentErrorMessage(e, u),
                 cause: e,
                 stackTrace: st,
               ),
@@ -983,7 +1236,10 @@ class MetaLinkClient {
   Future<void> _disposeOwnedResources() async {
     final active = <Future<void>>[
       for (final operation in _inFlight.values)
-        operation.then<void>((_) {}, onError: (Object _, StackTrace _) {}),
+        operation.result.then<void>(
+          (_) {},
+          onError: (Object _, StackTrace _) {},
+        ),
       ..._activeOperations,
     ];
     if (active.isNotEmpty) {
@@ -1012,9 +1268,11 @@ class MetaLinkClient {
       }
     }
 
-    if (_ownsCacheStore && _cacheStore != null) {
+    // Read after active work finishes, which may have created the store.
+    final cacheStore = _cacheStore;
+    if (_ownsCacheStore && cacheStore != null) {
       try {
-        await _cacheStore.close();
+        await cacheStore.close();
       } catch (e, st) {
         _log(
           MetaLinkLogLevel.warning,
@@ -1053,6 +1311,60 @@ class MetaLinkClient {
   void close() => unawaited(dispose());
 
   // Private helpers keep error handling and caching logic centralized.
+
+  /// Cache warnings that describe one request's cache access.
+  ///
+  /// They are never persisted in a full cache payload or replayed from one,
+  /// because a later cache hit did not experience them.
+  static const Set<MetaLinkWarningCode> _requestScopedCacheWarningCodes =
+      <MetaLinkWarningCode>{
+        MetaLinkWarningCode.cacheBypassed,
+        MetaLinkWarningCode.cacheReadFailed,
+        MetaLinkWarningCode.cacheWriteFailed,
+      };
+
+  /// A [MemoryCacheStore] for this client to own, configured from [cache].
+  ///
+  /// A nonpositive [CacheOptions.ttl] means "use the store default". Passing
+  /// it on as the store's `defaultTtl` would instead make store-default
+  /// entries never expire, so that case keeps [MemoryCacheStore]'s default.
+  static MemoryCacheStore _createOwnedCacheStore(CacheOptions cache) {
+    return cache.ttl > Duration.zero
+        ? MemoryCacheStore(defaultTtl: cache.ttl)
+        : MemoryCacheStore();
+  }
+
+  /// The store for a request whose [CacheOptions.enabled] is `true`.
+  ///
+  /// A client built without a store creates and owns one the first time a
+  /// request enables caching. Creation is synchronous, so concurrent requests
+  /// always observe the same store.
+  CacheStore _cacheStoreForRequest() {
+    final existing = _cacheStore;
+    if (existing != null) return existing;
+
+    final created = _createOwnedCacheStore(options.cache);
+    _cacheStore = created;
+    _ownsCacheStore = true;
+    return created;
+  }
+
+  MetaLinkWarning _cacheBypassedWarning(Uri originalUrl) {
+    return MetaLinkWarning(
+      code: MetaLinkWarningCode.cacheBypassed,
+      message: 'Cache was bypassed for this request.',
+      uri: originalUrl,
+    );
+  }
+
+  /// The message for a batch item that [extract] rejected as invalid input.
+  ///
+  /// [ArgumentError.message] is untyped, so a non-string message is rendered
+  /// with `toString` instead of failing the batch with a type error.
+  String _argumentErrorMessage(ArgumentError error, String url) {
+    final Object? message = error.message;
+    return message?.toString() ?? 'Invalid URL input: "$url"';
+  }
 
   Future<T> _trackOperation<T>(Future<T> operation) {
     final completion = operation.then<void>(
@@ -1170,7 +1482,7 @@ class MetaLinkClient {
     final remaining = context.remaining;
     if (remaining != null) {
       final deadline = Completer<T>();
-      deadlineTimer = Timer(
+      deadlineTimer = startDeadlineTimer(
         remaining,
         () => deadline.completeError(
           TimeoutException('Complete request deadline elapsed'),
@@ -1180,17 +1492,11 @@ class MetaLinkClient {
     }
 
     final cancellation = context.cancellationSignal;
+    _CompleterHolder<T>? cancellationHolder;
     if (cancellation != null) {
       final cancelled = Completer<T>();
-      cancellation
-          .then<void>(
-            (_) =>
-                cancelled.completeError(FetchCancellationException(requestUrl)),
-            onError: (Object _, StackTrace _) {
-              cancelled.completeError(FetchCancellationException(requestUrl));
-            },
-          )
-          .ignore();
+      cancellationHolder = _CompleterHolder<T>(cancelled);
+      _failOnCancellation(cancellation, cancellationHolder, requestUrl);
       races.add(cancelled.future);
     }
 
@@ -1198,7 +1504,36 @@ class MetaLinkClient {
       return await Future.any<T>(races);
     } finally {
       deadlineTimer?.cancel();
+      // Detach from a caller-owned signal that can outlive this race, so the
+      // signal no longer reaches the race or the result it produced.
+      cancellationHolder?.completer = null;
     }
+  }
+
+  /// Fails the completer in [holder] with a [FetchCancellationException]
+  /// when [signal] completes with a value or an error.
+  ///
+  /// This is static so the listener's closure captures only [holder] and
+  /// [requestUrl]. A listener created inside a race would capture the race's
+  /// whole scope, so a long-lived signal that never completes would keep
+  /// every finished race and its result reachable.
+  static void _failOnCancellation<T>(
+    Future<void> signal,
+    _CompleterHolder<T> holder,
+    Uri requestUrl,
+  ) {
+    void cancel() {
+      final completer = holder.completer;
+      holder.completer = null;
+      completer?.completeError(FetchCancellationException(requestUrl));
+    }
+
+    signal
+        .then<void>(
+          (_) => cancel(),
+          onError: (Object _, StackTrace _) => cancel(),
+        )
+        .ignore();
   }
 
   RequestFailure? _currentRequestLifetimeFailure({
@@ -1329,6 +1664,10 @@ class MetaLinkClient {
     );
   }
 
+  /// A copy of [input] for [originalUrl] with its own top-level lists.
+  ///
+  /// Every [LinkMetadata] field must be carried over here; nested values such
+  /// as [LinkMetadata.manifest] are shared.
   LinkMetadata _cloneMetadataWithOriginal(LinkMetadata input, Uri originalUrl) {
     return LinkMetadata(
       originalUrl: originalUrl,
@@ -1339,14 +1678,14 @@ class MetaLinkClient {
       siteName: input.siteName,
       locale: input.locale,
       kind: input.kind,
-      images: input.images,
-      icons: input.icons,
-      videos: input.videos,
-      audios: input.audios,
+      images: List.of(input.images),
+      icons: List.of(input.icons),
+      videos: List.of(input.videos),
+      audios: List.of(input.audios),
       publishedAt: input.publishedAt,
       modifiedAt: input.modifiedAt,
       author: input.author,
-      keywords: input.keywords,
+      keywords: List.of(input.keywords),
       oembed: input.oembed,
       manifest: input.manifest,
       structuredData: input.structuredData,
@@ -1368,7 +1707,9 @@ class MetaLinkClient {
     required CacheOptions cacheOptions,
   }) {
     final parts = <String>[
-      'engine=2.1',
+      // Bump whenever extraction output changes, so a persistent store never
+      // serves entries an older engine produced.
+      'engine=2.2',
       cacheKeyUrl.toString(),
       cacheOptions.payloadKind.name,
       _fetchOptionsSignature(fetchOptions),
@@ -1471,8 +1812,11 @@ class MetaLinkClient {
         RequestFailureCode.transport => MetaLinkErrorCode.network,
       };
       final reason = switch (error.code) {
+        // A proxy that cannot produce a valid target is a deterministic local
+        // misconfiguration; reporting it as rejected keeps it non-retryable.
         RequestFailureCode.policyRejected ||
-        RequestFailureCode.unsupportedCapability =>
+        RequestFailureCode.unsupportedCapability ||
+        RequestFailureCode.proxyConfiguration =>
           MetaLinkErrorReason.policyRejected,
         RequestFailureCode.redirectLimit ||
         RequestFailureCode.redirectLoop ||
@@ -1481,7 +1825,6 @@ class MetaLinkClient {
         RequestFailureCode.cancelled => MetaLinkErrorReason.cancelled,
         RequestFailureCode.invalidTarget ||
         RequestFailureCode.timeout ||
-        RequestFailureCode.proxyConfiguration ||
         RequestFailureCode.transport => null,
       };
       return MetaLinkError(
@@ -1596,7 +1939,11 @@ class MetaLinkClient {
           'metadata': metadata.toJson(),
           'diagnostics': diagnostics.toJson(),
           'raw': raw?.toJson(),
-          'warnings': warnings.map((w) => w.toJson()).toList(),
+          'warnings': <Map<String, dynamic>>[
+            for (final warning in warnings)
+              if (!_requestScopedCacheWarningCodes.contains(warning.code))
+                warning.toJson(),
+          ],
           'errors': errors.map((e) => e.toJson()).toList(),
           'status': status.name,
           'completeness': completeness,
@@ -1659,9 +2006,14 @@ class MetaLinkClient {
         if (warningsAny is List) {
           for (final w in warningsAny) {
             if (w is Map) {
-              cachedWarnings.add(
-                MetaLinkWarning.fromJson(Map<String, dynamic>.from(w)),
+              final warning = MetaLinkWarning.fromJson(
+                Map<String, dynamic>.from(w),
               );
+              // Entries written before these warnings were excluded can
+              // still carry one; it never applies to this request.
+              if (!_requestScopedCacheWarningCodes.contains(warning.code)) {
+                cachedWarnings.add(warning);
+              }
             }
           }
         }
@@ -1691,6 +2043,27 @@ class MetaLinkClient {
         final cachedCompleteness = completenessValue is num
             ? completenessValue.toDouble()
             : null;
+
+        // The result constructor asserts these invariants, so debug builds
+        // would reject such an entry while release builds would silently
+        // serve a corrected one. Reject it explicitly in every build mode.
+        final failureWithoutError =
+            cachedStatus == ExtractionStatus.failure && cachedErrors.isEmpty;
+        final completenessOutOfRange =
+            cachedCompleteness != null &&
+            !(cachedCompleteness >= 0 && cachedCompleteness <= 1);
+        if (failureWithoutError || completenessOutOfRange) {
+          _log(
+            MetaLinkLogLevel.warning,
+            'Cached result is internally inconsistent; treating as cache miss.',
+            context: <String, Object?>{
+              'status': statusName,
+              'decodedErrors': cachedErrors.length,
+              'completeness': completenessValue,
+            },
+          );
+          return null;
+        }
 
         return ExtractionResult<LinkMetadata>(
           metadata: patchedMeta,
@@ -1741,12 +2114,142 @@ class MetaLinkClient {
       }
     }
 
+    // A worker beyond one per item would start, find no work, and exit, so
+    // cap the pool to keep a large concurrency from costing time and memory.
+    final workerCount = math.min(concurrency, items.length);
     final workers = <Future<void>>[];
-    for (var i = 0; i < concurrency; i++) {
+    for (var i = 0; i < workerCount; i++) {
       workers.add(worker());
     }
 
     await Future.wait(workers);
     return results.cast<R>();
   }
+}
+
+/// A copy of the structured data [nodes] that shares no map or list with them.
+///
+/// The walk keeps its own stack instead of recursing, because the nesting
+/// depth of these JSON-like values is bounded only by the configurable
+/// `JsonLdTraversalLimits.maxDepth`, or not at all for values a cache store
+/// returns. Each map or list is copied once, so a value that appears in
+/// several places is still shared between those places in the copy, and a
+/// cycle cannot make the walk loop. String-keyed maps are copied as
+/// `Map<String, dynamic>`, other maps as `Map<dynamic, dynamic>`, and lists as
+/// `List<dynamic>`. Any other value, such as a string, number, boolean, or
+/// `null`, is shared.
+List<Map<String, dynamic>> _copyStructuredDataNodes(
+  List<Map<String, dynamic>> nodes,
+) {
+  final copies = Map<Object, Object>.identity();
+  final pending = <(Object, Object)>[];
+
+  // Returns the copy of [value], whose contents are filled in later.
+  Object? copyOf(Object? value) {
+    if (value is Map) {
+      final existing = copies[value];
+      if (existing != null) return existing;
+      final copy = value is Map<String, dynamic>
+          ? <String, dynamic>{}
+          : <dynamic, dynamic>{};
+      copies[value] = copy;
+      pending.add((value, copy));
+      return copy;
+    }
+    if (value is List) {
+      final existing = copies[value];
+      if (existing != null) return existing;
+      final copy = <dynamic>[];
+      copies[value] = copy;
+      pending.add((value, copy));
+      return copy;
+    }
+    return value;
+  }
+
+  final result = <Map<String, dynamic>>[
+    for (final node in nodes) copyOf(node)! as Map<String, dynamic>,
+  ];
+  while (pending.isNotEmpty) {
+    final (source, copy) = pending.removeLast();
+    if (source is Map && copy is Map) {
+      for (final entry in source.entries) {
+        copy[entry.key] = copyOf(entry.value);
+      }
+    } else if (source is List && copy is List) {
+      for (final element in source) {
+        copy.add(copyOf(element));
+      }
+    }
+  }
+  return result;
+}
+
+/// An extraction that identical concurrent calls can join.
+///
+/// Wrapping the future keeps the in-flight map's values from being futures,
+/// so removing a completed entry does not produce a discarded future.
+final class _InFlightExtraction {
+  /// Starts [extraction] and times it against [totalTimeout].
+  ///
+  /// The stopwatch starts before [extraction] creates its request context, and
+  /// it stops before [result] completes, so callers read the duration the
+  /// shared operation actually took.
+  _InFlightExtraction.start(
+    Future<ExtractionResult<LinkMetadata>> Function() extraction, {
+    required this.totalTimeout,
+    required this.requestPolicy,
+  }) {
+    _stopwatch.start();
+    result = extraction().whenComplete(_stopwatch.stop);
+  }
+
+  /// The allowance for a deadline timer that fires slightly early.
+  ///
+  /// VM timers count whole milliseconds, so a deadline armed from a
+  /// microsecond budget can fire up to about two milliseconds early. This
+  /// covers that with a margin.
+  static const Duration _timerGranularity = Duration(milliseconds: 5);
+
+  final Stopwatch _stopwatch = Stopwatch();
+
+  /// The complete operation deadline the shared extraction ran under.
+  final Duration totalTimeout;
+
+  /// The request policy the shared extraction ran under.
+  final RequestPolicy requestPolicy;
+
+  /// How many later calls have joined this extraction.
+  ///
+  /// `extract` increments it synchronously, before the joining call awaits
+  /// anything, so the first caller reads an exact count once [result]
+  /// completes. While it is zero, the first caller may receive the shared
+  /// result itself instead of a copy.
+  int joiners = 0;
+
+  /// The shared extraction result.
+  ///
+  /// When any call has joined, every caller receives its own copy, and this
+  /// result itself stays unchanged.
+  late final Future<ExtractionResult<LinkMetadata>> result;
+
+  /// Whether the shared extraction ran for its whole [totalTimeout].
+  ///
+  /// A timeout that ends the operation this late was its complete deadline
+  /// rather than an earlier per-attempt timeout.
+  bool get exhaustedTotalTimeout =>
+      _stopwatch.elapsed + _timerGranularity >= totalTimeout;
+}
+
+/// A completer that a cancellation listener can reach only while needed.
+///
+/// A caller-owned cancellation signal can outlive every request that uses
+/// it. Its listener holds this object rather than the completer itself, and
+/// the race clears [completer] when it settles, so a signal that never
+/// completes retains only an empty holder.
+final class _CompleterHolder<T> {
+  _CompleterHolder(this.completer);
+
+  /// The race's cancellation completer, or `null` once it no longer matters.
+  Completer<T>? completer;
 }

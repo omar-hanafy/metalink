@@ -6,8 +6,8 @@ the maintained reference for Flutter developers.
 
 The separation is intentional:
 
-- MetaLink owns fetching, parsing, ranking, caching, request safety, lifecycle,
-  structured failures, and diagnostics.
+- MetaLink owns fetching, parsing, ranking, caching, the safety of its own
+  requests, lifecycle, structured failures, and diagnostics.
 - The application owns state, layout, typography, navigation, images, and every
   other product-specific UI decision.
 
@@ -39,5 +39,17 @@ policy-aware server or custom MetaLink `Fetcher`.
 The card is an educational starting point, not another stable widget API. Copy
 it, restyle it, or replace it with the design system your application already
 owns.
+
+## Request safety and images
+
+The sample runs MetaLink under `RequestPolicy.secure()`. That policy covers
+only the requests MetaLink itself makes. The preview's images and favicons are
+loaded by Flutter's image loader (`Image.network`), which does not apply it, so
+a page can point them at loopback or private-network addresses and the device
+will request them.
+
+An application that previews untrusted links should validate those URLs before
+loading them, for example with `RequestPolicy.validateTarget`, or load them
+through its own policy-aware image pipeline.
 
 See the [MetaLink README](../../README.md) for the complete engine API.

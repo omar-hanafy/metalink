@@ -1,4 +1,5 @@
 import 'package:convert_object/convert_object.dart';
+import 'package:metalink/src/model/json_uri.dart';
 
 /// Represents an image candidate extracted from the page.
 ///
@@ -49,6 +50,10 @@ class ImageCandidate {
   /// File size in bytes, or `null` if not known.
   final int? byteSize;
 
+  /// A JSON-compatible map of this image candidate.
+  ///
+  /// [url] is written as a string, and absent optional values as `null`.
+  /// [ImageCandidate.fromJson] reads this format back.
   Map<String, dynamic> toJson() {
     return <String, dynamic>{
       'url': url.toString(),
@@ -60,9 +65,14 @@ class ImageCandidate {
     };
   }
 
+  /// Creates an [ImageCandidate] from a map produced by [toJson].
+  ///
+  /// Throws a `ConversionException` from `package:convert_object` when `url`
+  /// is missing or is not a valid URI. Optional values that cannot be
+  /// converted become `null`.
   factory ImageCandidate.fromJson(Map<String, dynamic> json) {
     return ImageCandidate(
-      url: json.getUri('url'),
+      url: readJsonUri(json, 'url'),
       width: json.tryGetInt('width'),
       height: json.tryGetInt('height'),
       mimeType: json.tryGetString('mimeType'),
@@ -102,6 +112,10 @@ class VideoCandidate {
   /// MIME type (e.g., `video/mp4`), or `null` if not declared.
   final String? mimeType;
 
+  /// A JSON-compatible map of this video candidate.
+  ///
+  /// [url] is written as a string, and absent optional values as `null`.
+  /// [VideoCandidate.fromJson] reads this format back.
   Map<String, dynamic> toJson() {
     return <String, dynamic>{
       'url': url.toString(),
@@ -111,9 +125,14 @@ class VideoCandidate {
     };
   }
 
+  /// Creates a [VideoCandidate] from a map produced by [toJson].
+  ///
+  /// Throws a `ConversionException` from `package:convert_object` when `url`
+  /// is missing or is not a valid URI. Optional values that cannot be
+  /// converted become `null`.
   factory VideoCandidate.fromJson(Map<String, dynamic> json) {
     return VideoCandidate(
-      url: json.getUri('url'),
+      url: readJsonUri(json, 'url'),
       width: json.tryGetInt('width'),
       height: json.tryGetInt('height'),
       mimeType: json.tryGetString('mimeType'),
@@ -139,13 +158,22 @@ class AudioCandidate {
   /// MIME type (e.g., `audio/mpeg`), or `null` if not declared.
   final String? mimeType;
 
+  /// A JSON-compatible map of this audio candidate.
+  ///
+  /// [url] is written as a string, and absent optional values as `null`.
+  /// [AudioCandidate.fromJson] reads this format back.
   Map<String, dynamic> toJson() {
     return <String, dynamic>{'url': url.toString(), 'mimeType': mimeType};
   }
 
+  /// Creates an [AudioCandidate] from a map produced by [toJson].
+  ///
+  /// Throws a `ConversionException` from `package:convert_object` when `url`
+  /// is missing or is not a valid URI. Optional values that cannot be
+  /// converted become `null`.
   factory AudioCandidate.fromJson(Map<String, dynamic> json) {
     return AudioCandidate(
-      url: json.getUri('url'),
+      url: readJsonUri(json, 'url'),
       mimeType: json.tryGetString('mimeType'),
     );
   }

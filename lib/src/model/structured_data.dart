@@ -1,3 +1,6 @@
+/// @docImport 'package:metalink/src/model/link_metadata.dart';
+library;
+
 import 'package:convert_object/convert_object.dart';
 
 /// JSON-LD structured data extracted from the page.
@@ -28,10 +31,19 @@ class StructuredDataGraph {
   /// Each node is a schema.org entity with `@type`, `@context`, etc.
   final List<Map<String, dynamic>> nodes;
 
+  /// A JSON-compatible map with the [nodes] list under `nodes`.
+  ///
+  /// The node maps are included as is, not copied.
+  /// [StructuredDataGraph.fromJson] reads this format back.
   Map<String, dynamic> toJson() {
     return <String, dynamic>{'nodes': nodes};
   }
 
+  /// Creates a [StructuredDataGraph] from a map produced by [toJson].
+  ///
+  /// Parsing is lenient and does not throw. A missing `nodes` value yields an
+  /// empty graph. Entries that are not string-keyed maps, and empty maps, are
+  /// dropped.
   factory StructuredDataGraph.fromJson(Map<String, dynamic> json) {
     return StructuredDataGraph(
       nodes: Convert.toList<Map<String, dynamic>>(

@@ -23,9 +23,9 @@ class MetaLinkShowcaseApp extends StatelessWidget {
         colorScheme: colorScheme,
         scaffoldBackgroundColor: const Color(0xFFF8F6FC),
         useMaterial3: true,
-        inputDecorationTheme: InputDecorationTheme(
+        inputDecorationTheme: InputDecorationThemeData(
           filled: true,
-          fillColor: Colors.white.withValues(alpha: 0.88),
+          fillColor: colorScheme.surfaceContainerLowest.withValues(alpha: 0.88),
           border: OutlineInputBorder(
             borderRadius: BorderRadius.circular(18),
             borderSide: BorderSide.none,

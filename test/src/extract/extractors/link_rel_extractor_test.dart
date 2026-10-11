@@ -92,4 +92,60 @@ void main() {
     expect(metadata.oembed, isNotNull);
     expect(metadata.oembed!.title, 'OEmbed XML');
   });
+
+  test('a later duplicate icon contributes its richer attributes', () async {
+    const html =
+        '<link rel="icon" href="/icon.png">'
+        '<link rel="apple-touch-icon" href="/icon.png" sizes="180x180" '
+        'type="image/png">';
+    final metadata = await runPipeline(
+      html: html,
+      stages: const [LinkRelExtractor()],
+    );
+
+    expect(metadata.icons, hasLength(1));
+    final icon = metadata.icons.single;
+    expect(icon.url.toString(), 'https://example.com/icon.png');
+    expect(icon.rel, 'apple-touch-icon');
+    expect(icon.sizes, '180x180');
+    expect(icon.type, 'image/png');
+  });
+
+  test('empty sizes and type attributes are absent, not empty', () async {
+    const html =
+        '<link rel="icon" href="/a.png" sizes="" type=" ">'
+        '<link rel="icon" href="/a.png" sizes="32x32" type="image/png">';
+    final metadata = await runPipeline(
+      html: html,
+      stages: const [LinkRelExtractor()],
+    );
+
+    expect(metadata.icons, hasLength(1));
+    expect(metadata.icons.single.sizes, '32x32');
+    expect(metadata.icons.single.type, 'image/png');
+  });
+
+  test('an icon without sizes or type reports null attributes', () async {
+    const html = '<link rel="icon" href="/b.png" sizes="" type="">';
+    final metadata = await runPipeline(
+      html: html,
+      stages: const [LinkRelExtractor()],
+    );
+
+    expect(metadata.icons.single.sizes, isNull);
+    expect(metadata.icons.single.type, isNull);
+  });
+
+  test('EXT-R2-5 removes newlines from a link icon href', () async {
+    const html = '<link rel="icon" href="/icons/\nfavicon.ico">';
+    final metadata = await runPipeline(
+      html: html,
+      stages: const [LinkRelExtractor()],
+    );
+
+    expect(
+      metadata.icons.single.url.toString(),
+      'https://example.com/icons/favicon.ico',
+    );
+  });
 }

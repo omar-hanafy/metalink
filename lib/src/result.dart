@@ -24,6 +24,17 @@ enum ExtractionStatus {
 /// Contains the resolved [metadata], diagnostic information, and any errors or warnings
 /// collected during the process.
 class ExtractionResult<T> {
+  /// Creates an [ExtractionResult].
+  ///
+  /// When `status` is omitted, [ExtractionResult.status] is inferred from
+  /// [errors] and [warnings] with [inferStatus]. `completeness` is an optional
+  /// estimate between `0` and `1`.
+  ///
+  /// When assertions are enabled, the constructor rejects an
+  /// [ExtractionStatus.failure] status without [errors] and a `completeness`
+  /// outside `0` to `1`. Release builds skip those checks:
+  /// [ExtractionResult.status] then infers the status, and
+  /// [ExtractionResult.completeness] returns `null`.
   const ExtractionResult({
     required this.metadata,
     required this.diagnostics,
@@ -85,25 +96,38 @@ class ExtractionResult<T> {
     return value;
   }
 
-  /// The explicit outcome status.
+  /// The high-level outcome of this extraction.
   ///
-  /// Results produced by the v2-compatible constructor infer failure from
-  /// [errors] and otherwise infer success. New engine paths can explicitly
-  /// identify a partial result.
+  /// Any entry in [errors] makes this [ExtractionStatus.failure], even when a
+  /// different status was passed to the constructor. Otherwise the explicit
+  /// status is returned, so engine paths can mark a result as partial.
+  ///
+  /// Without an explicit status, the status is inferred with [inferStatus]. An
+  /// explicit [ExtractionStatus.failure] without errors, which only release
+  /// builds accept, is inferred the same way.
   ExtractionStatus get status {
     // Fatal errors always dominate an explicit status so callers cannot
     // observe success and failure simultaneously.
     if (errors.isNotEmpty) return ExtractionStatus.failure;
     final explicit = _explicitStatus;
-    if (explicit == ExtractionStatus.failure) {
-      // Keep release builds internally consistent even when a caller bypasses
-      // constructor assertions.
-      return ExtractionStatus.success;
+    if (explicit == null || explicit == ExtractionStatus.failure) {
+      // An explicit failure without errors can only exist when constructor
+      // assertions are disabled. Infer it like an omitted status so a degraded
+      // result still reports partial instead of being promoted to success.
+      return inferStatus(warnings: warnings, errors: errors);
     }
-    return explicit ?? inferStatus(warnings: warnings, errors: errors);
+    return explicit;
   }
 
-  /// Infers status from the package's shared warning and error taxonomy.
+  /// The status implied by [warnings] and [errors].
+  ///
+  /// Returns [ExtractionStatus.failure] when [errors] is non-empty and
+  /// [ExtractionStatus.partial] when any warning signals lost information:
+  /// [MetaLinkWarningCode.redirectedTooMuch],
+  /// [MetaLinkWarningCode.truncatedHtml], [MetaLinkWarningCode.oembedFailed],
+  /// [MetaLinkWarningCode.manifestFailed], or
+  /// [MetaLinkWarningCode.partialParse]. Otherwise returns
+  /// [ExtractionStatus.success].
   static ExtractionStatus inferStatus({
     required List<MetaLinkWarning> warnings,
     required List<MetaLinkError> errors,

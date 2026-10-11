@@ -17,10 +17,17 @@ class UrlResolver {
 
   /// Resolves [raw] against [base] to produce an absolute HTTP(S) URI.
   ///
+  /// Before parsing, [raw] is cleaned as the WHATWG URL parser does: every
+  /// ASCII tab, line feed, and carriage return is removed, and leading and
+  /// trailing C0 control characters and spaces are trimmed, so a URL wrapped
+  /// across lines in an attribute resolves as browsers would. Other
+  /// surrounding Unicode whitespace is also trimmed. Interior spaces are kept
+  /// and percent-encoded.
+  ///
   /// Returns `null` if [raw] is empty, invalid, or uses a non-HTTP scheme.
   Uri? resolve(Uri base, String? raw) {
     if (raw == null) return null;
-    final trimmed = raw.trim();
+    final trimmed = _cleanInput(raw);
     if (trimmed.isEmpty) return null;
 
     // Ignore non-fetchable schemes so only safe HTTP(S) URLs enter the pipeline.
@@ -65,6 +72,18 @@ class UrlResolver {
     }
     return out;
   }
+
+  // Mirrors the WHATWG URL parser's input cleanup. The final `trim` keeps the
+  // previous tolerance for surrounding non-ASCII whitespace such as U+00A0.
+  static String _cleanInput(String raw) {
+    final withoutTabsOrNewlines = raw.replaceAll(_tabOrNewline, '');
+    return withoutTabsOrNewlines.replaceAll(_edgeC0OrSpace, '').trim();
+  }
+
+  static final RegExp _tabOrNewline = RegExp('[\t\n\r]');
+  static final RegExp _edgeC0OrSpace = RegExp(
+    '^[\u0000-\u0020]+|[\u0000-\u0020]+\$',
+  );
 
   Uri? _accept(Uri? uri) {
     if (uri == null) return null;

@@ -1,4 +1,8 @@
+/// @docImport 'package:metalink/src/model/link_metadata.dart';
+library;
+
 import 'package:convert_object/convert_object.dart';
+import 'package:metalink/src/model/json_uri.dart';
 
 /// The response format of an oEmbed endpoint.
 enum OEmbedFormat {
@@ -27,13 +31,22 @@ class OEmbedEndpoint {
   /// The response format of the endpoint.
   final OEmbedFormat format;
 
+  /// A JSON-compatible map of this endpoint.
+  ///
+  /// [url] is written as a string and [format] as its enum name.
+  /// [OEmbedEndpoint.fromJson] reads this format back.
   Map<String, dynamic> toJson() {
     return <String, dynamic>{'url': url.toString(), 'format': format.name};
   }
 
+  /// Creates an [OEmbedEndpoint] from a map produced by [toJson].
+  ///
+  /// Throws a `ConversionException` from `package:convert_object` when `url`
+  /// is missing or is not a valid URI. A missing or unknown `format` falls
+  /// back to [OEmbedFormat.json].
   factory OEmbedEndpoint.fromJson(Map<String, dynamic> json) {
     return OEmbedEndpoint(
-      url: json.getUri('url'),
+      url: readJsonUri(json, 'url'),
       format: json.getEnum(
         'format',
         parser: EnumParsers.byName(OEmbedFormat.values),
@@ -128,6 +141,11 @@ class OEmbedData {
   /// Embed height in pixels.
   final int? height;
 
+  /// A JSON-compatible map of this oEmbed data.
+  ///
+  /// URLs are written as strings, and absent optional values as `null`. Keys
+  /// use the Dart field names, such as `authorName`, not the oEmbed wire names
+  /// such as `author_name`. [OEmbedData.fromJson] reads this format back.
   Map<String, dynamic> toJson() {
     return <String, dynamic>{
       'endpoint': endpoint.toString(),
@@ -147,17 +165,23 @@ class OEmbedData {
     };
   }
 
+  /// Creates an [OEmbedData] from a map produced by [toJson].
+  ///
+  /// This reads the serialized model format, not a raw oEmbed provider
+  /// response. Throws a `ConversionException` from `package:convert_object`
+  /// when `endpoint` is missing or is not a valid URI. Optional values that
+  /// cannot be converted become `null`.
   factory OEmbedData.fromJson(Map<String, dynamic> json) {
     return OEmbedData(
-      endpoint: json.getUri('endpoint'),
+      endpoint: readJsonUri(json, 'endpoint'),
       type: json.tryGetString('type'),
       version: json.tryGetString('version'),
       title: json.tryGetString('title'),
       authorName: json.tryGetString('authorName'),
-      authorUrl: json.tryGetUri('authorUrl'),
+      authorUrl: tryReadJsonUri(json, 'authorUrl'),
       providerName: json.tryGetString('providerName'),
-      providerUrl: json.tryGetUri('providerUrl'),
-      thumbnailUrl: json.tryGetUri('thumbnailUrl'),
+      providerUrl: tryReadJsonUri(json, 'providerUrl'),
+      thumbnailUrl: tryReadJsonUri(json, 'thumbnailUrl'),
       thumbnailWidth: json.tryGetInt('thumbnailWidth'),
       thumbnailHeight: json.tryGetInt('thumbnailHeight'),
       html: json.tryGetString('html'),

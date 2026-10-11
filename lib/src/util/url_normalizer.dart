@@ -18,6 +18,20 @@ class UrlNormalizer {
     r'^[a-zA-Z][a-zA-Z0-9+\-.]*://',
   );
 
+  // An http(s) scheme name followed by optional whitespace and then `:` or
+  // `//`, such as `https:/host`, `http:host`, `https//host`, or
+  // `https ://host`. Unless it is exactly `http://` or `https://`, the
+  // host-only branch would read the scheme name as the host and produce a
+  // request to `https://https/...`.
+  static final RegExp _schemeLikePrefixRegex = RegExp(
+    r'^https?\s*(?::|//)',
+    caseSensitive: false,
+  );
+  static final RegExp _httpAuthorityPrefixRegex = RegExp(
+    r'^https?://',
+    caseSensitive: false,
+  );
+
   static final List<String> _forbiddenSchemes = <String>[
     'mailto:',
     'tel:',
@@ -34,7 +48,11 @@ class UrlNormalizer {
   /// Parses a loose URL string into a normalized [Uri].
   ///
   /// Handles protocol-relative URLs, host-only input, and filters
-  /// non-HTTP schemes. Returns `null` for invalid or unsupported input.
+  /// non-HTTP schemes. Returns `null` for invalid or unsupported input,
+  /// including a mistyped `http` or `https` scheme such as `https:/host`,
+  /// `https//host`, or `https ://host`, and a bare `http` or `https`; the
+  /// intended host cannot be known reliably. Host names that merely start with
+  /// a scheme name, such as `http.example.com`, are accepted.
   static Uri? parseLoose(String input) {
     final raw = input.trim();
     if (raw.isEmpty) return null;
@@ -42,6 +60,10 @@ class UrlNormalizer {
     final rawLower = raw.toLowerCase();
     for (final scheme in _forbiddenSchemes) {
       if (rawLower.startsWith(scheme)) return null;
+    }
+    if (_schemeLikePrefixRegex.hasMatch(raw) &&
+        !_httpAuthorityPrefixRegex.hasMatch(raw)) {
+      return null;
     }
 
     // Protocol-relative URLs inherit https to form a valid absolute URL.
@@ -69,6 +91,10 @@ class UrlNormalizer {
     final uri = Uri.tryParse('https://$candidate');
     if (uri == null) return null;
     if (uri.host.isEmpty) return null;
+    // A host that is only a scheme name, from input such as `https` or
+    // `http/page`, is a mistyped URL rather than a real host.
+    final host = uri.host.toLowerCase().replaceFirst(RegExp(r'\.+$'), '');
+    if (host == 'http' || host == 'https') return null;
 
     return normalizeForRequest(uri);
   }

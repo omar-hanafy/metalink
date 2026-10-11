@@ -99,10 +99,27 @@ class HtmlFetchResult {
 /// If HEAD indicates non-HTML content, the fetch stops early.
 class HtmlSnippetFetcher {
   /// Creates an [HtmlSnippetFetcher] with the given [Fetcher].
-  HtmlSnippetFetcher({required Fetcher fetcher}) : _fetcher = fetcher;
+  HtmlSnippetFetcher({required this._fetcher});
 
   final Fetcher _fetcher;
 
+  /// Fetches the document at [url], following redirects, and decodes its body.
+  ///
+  /// When both [FetchOptions.followRedirects] and [FetchOptions.stopAfterHead]
+  /// are `true`, redirects are resolved with HEAD and the body is requested
+  /// with GET only when the HEAD `Content-Type` looks like HTML or is
+  /// missing. A non-HTML HEAD response is returned with an empty body and no
+  /// error. A HEAD that fails or returns an error status falls back to GET.
+  /// Otherwise every hop uses GET.
+  ///
+  /// An `Accept` header preferring HTML is added unless [FetchOptions.headers]
+  /// sets one. The body is read up to [FetchOptions.maxBytes] and decoded to
+  /// [HtmlFetchResult.bodyText] only when it is non-empty and its content type
+  /// is textual or missing. When [context] is `null`, a context bounded by
+  /// [FetchOptions.totalTimeout] is used.
+  ///
+  /// This method does not throw. A request failure is reported in
+  /// [HtmlFetchResult.error], usually as a [RequestFailure].
   Future<HtmlFetchResult> fetch(
     Uri url, {
     required FetchOptions options,

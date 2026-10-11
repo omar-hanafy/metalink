@@ -7,7 +7,8 @@ void main() {
     // LIVE INTEGRATION TESTS
     // ---------------------------------------------------------------------------
     // These tests make REAL network requests.
-    // usage: dart test -t live
+    // dart_test.yaml skips the `live` tag by default, so run them with:
+    //   dart test --tags live --run-skipped
     // ---------------------------------------------------------------------------
 
     const browserUserAgent =

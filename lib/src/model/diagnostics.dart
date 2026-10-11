@@ -1,4 +1,11 @@
+/// @docImport 'package:metalink/src/cache/cache_store.dart';
+/// @docImport 'package:metalink/src/model/link_metadata.dart';
+/// @docImport 'package:metalink/src/parse/metalink_parser.dart';
+/// @docImport 'package:metalink/src/result.dart';
+library;
+
 import 'package:convert_object/convert_object.dart';
+import 'package:metalink/src/model/json_uri.dart';
 import 'package:metalink/src/model/url_optimization.dart';
 
 /// Indicates how the character encoding was determined for fetched HTML.
@@ -149,6 +156,10 @@ class FieldProvenance {
   /// Optional raw evidence or context for debugging (e.g., the original tag).
   final String? evidence;
 
+  /// A JSON-compatible map of this record.
+  ///
+  /// [source] is written as its enum name. `evidence` is written as `null`
+  /// when absent. [FieldProvenance.fromJson] reads this format back.
   Map<String, dynamic> toJson() {
     return <String, dynamic>{
       'source': source.name,
@@ -157,6 +168,12 @@ class FieldProvenance {
     };
   }
 
+  /// Creates a [FieldProvenance] from a map produced by [toJson].
+  ///
+  /// Parsing is lenient and does not throw for missing or malformed values:
+  /// an unknown `source` falls back to [CandidateSource.heuristic], a `score`
+  /// that cannot be read as a number becomes `0.0`, and a non-string
+  /// `evidence` value is converted with `toString()`.
   factory FieldProvenance.fromJson(Map<String, dynamic> json) {
     return FieldProvenance(
       source: json.getEnum(
@@ -176,6 +193,9 @@ class FieldProvenance {
 /// this record keeps provenance attached to a concrete image, icon, video,
 /// audio, or keyword after ranking and deduplication.
 class ItemProvenance {
+  /// Creates an [ItemProvenance] record.
+  ///
+  /// [contributors] defaults to an empty list.
   const ItemProvenance({
     required this.itemKey,
     required this.provenance,
@@ -194,6 +214,11 @@ class ItemProvenance {
   /// only when they filled an attribute missing from the leading candidate.
   final List<FieldProvenance> contributors;
 
+  /// A JSON-compatible map of this record.
+  ///
+  /// [provenance] and each entry of [contributors] are encoded with
+  /// [FieldProvenance.toJson]. [ItemProvenance.fromJson] reads this format
+  /// back.
   Map<String, dynamic> toJson() {
     return <String, dynamic>{
       'itemKey': itemKey,
@@ -204,6 +229,16 @@ class ItemProvenance {
     };
   }
 
+  /// Creates an [ItemProvenance] from a map produced by [toJson].
+  ///
+  /// Parsing is lenient and does not throw for missing or malformed values. A
+  /// missing `itemKey` becomes an empty string, and a missing or non-map
+  /// `provenance` becomes a [CandidateSource.heuristic] record with score
+  /// `0.0`. Nested maps may be loosely typed, such as `Map<dynamic, dynamic>`.
+  ///
+  /// When `contributors` is absent, as in payloads written before it existed,
+  /// the result lists [provenance] as the only contributor. Otherwise each
+  /// entry that is not a string-keyed map is skipped.
   factory ItemProvenance.fromJson(Map<String, dynamic> json) {
     final provenance = FieldProvenance.fromJson(
       json.getMap<String, dynamic>(
@@ -214,13 +249,10 @@ class ItemProvenance {
     final contributorValues = Convert.tryToList<dynamic>(json['contributors']);
     final contributors = contributorValues == null
         ? <FieldProvenance>[provenance]
-        : contributorValues
-              .whereType<Map>()
-              .map(
-                (value) =>
-                    FieldProvenance.fromJson(Map<String, dynamic>.from(value)),
-              )
-              .toList(growable: false);
+        : _jsonObjects(
+            contributorValues,
+            FieldProvenance.fromJson,
+          ).toList(growable: false);
 
     return ItemProvenance(
       itemKey: json.getString('itemKey', defaultValue: ''),
@@ -235,6 +267,7 @@ class ItemProvenance {
 /// Candidate decisions are diagnostic data. They explain the effective score
 /// used by the ranking policy without changing the stable metadata model.
 class CandidateDecision {
+  /// Creates a [CandidateDecision] record.
   const CandidateDecision({
     required this.valueKey,
     required this.source,
@@ -262,6 +295,10 @@ class CandidateDecision {
   /// Optional extraction evidence.
   final String? evidence;
 
+  /// A JSON-compatible map of this decision.
+  ///
+  /// [source] is written as its enum name. `evidence` is written as `null`
+  /// when absent. [CandidateDecision.fromJson] reads this format back.
   Map<String, dynamic> toJson() {
     return <String, dynamic>{
       'valueKey': valueKey,
@@ -273,6 +310,12 @@ class CandidateDecision {
     };
   }
 
+  /// Creates a [CandidateDecision] from a map produced by [toJson].
+  ///
+  /// Parsing is lenient and does not throw for missing or malformed values: a
+  /// missing `valueKey` becomes an empty string, an unknown `source` falls back
+  /// to [CandidateSource.heuristic], unreadable scores become `0.0`, and an
+  /// unreadable `selected` flag becomes `false`.
   factory CandidateDecision.fromJson(Map<String, dynamic> json) {
     return CandidateDecision(
       valueKey: json.getString('valueKey', defaultValue: ''),
@@ -338,7 +381,13 @@ class FetchDiagnostics {
   /// Whether the response was truncated due to size limits.
   final bool truncated;
 
-  /// The detected character encoding (e.g., `utf-8`, `iso-8859-1`).
+  /// The lowercase canonical name of the encoding used to decode the body,
+  /// such as `utf-8`, `windows-1252`, or `shift_jis`.
+  ///
+  /// This names the decoder, which can differ from the declared label: an
+  /// `iso-8859-1` or `us-ascii` label reports `windows-1252`, following the
+  /// WHATWG Encoding Standard. A fallback reports `utf-8`. This is `null` when
+  /// no response body was decoded.
   final String? detectedCharset;
 
   /// How the charset was determined. See [CharsetSource].
@@ -347,6 +396,12 @@ class FetchDiagnostics {
   /// Total time spent on the HTTP fetch operation.
   final Duration duration;
 
+  /// A JSON-compatible map of these diagnostics.
+  ///
+  /// URLs are written as strings, [redirects] as a list of
+  /// [RedirectHop.toJson] maps, [charsetSource] as its enum name, and
+  /// [duration] as whole milliseconds under `durationMs`, so sub-millisecond
+  /// precision is lost. [FetchDiagnostics.fromJson] reads this format back.
   Map<String, dynamic> toJson() {
     return <String, dynamic>{
       'requestedUrl': requestedUrl.toString(),
@@ -361,17 +416,20 @@ class FetchDiagnostics {
     };
   }
 
+  /// Creates a [FetchDiagnostics] from a map produced by [toJson].
+  ///
+  /// Parsing is lenient and does not throw for missing or malformed values.
+  /// Missing or unparsable URLs become an empty [Uri], missing counters become
+  /// `0`, `truncated` defaults to `false`, and an unknown `charsetSource` falls
+  /// back to [CharsetSource.unknown]. Each `redirects` entry that is not a
+  /// string-keyed map is skipped, so one malformed hop does not discard the
+  /// others.
   factory FetchDiagnostics.fromJson(Map<String, dynamic> json) {
     return FetchDiagnostics(
-      requestedUrl: json.getUri('requestedUrl', defaultValue: Uri()),
-      finalUrl: json.getUri('finalUrl', defaultValue: Uri()),
+      requestedUrl: readJsonUri(json, 'requestedUrl', defaultValue: Uri()),
+      finalUrl: readJsonUri(json, 'finalUrl', defaultValue: Uri()),
       statusCode: json.tryGetInt('statusCode'),
-      redirects: Convert.toList<RedirectHop>(
-        json['redirects'],
-        elementConverter: (e) =>
-            RedirectHop.fromJson(Map<String, dynamic>.from(e as Map)),
-        defaultValue: [],
-      ),
+      redirects: _jsonObjects(json['redirects'], RedirectHop.fromJson).toList(),
       bytesRead: json.getInt('bytesRead', defaultValue: 0),
       truncated: json.getBool('truncated', defaultValue: false),
       detectedCharset: json.tryGetString('detectedCharset'),
@@ -400,12 +458,10 @@ class FetchDiagnostics {
 /// ```dart
 /// final result = await MetaLink.extract(url);
 /// final diag = result.diagnostics;
-/// if (diag != null) {
-///   print('Cache hit: ${diag.cacheHit}');
-///   print('Total time: ${diag.totalTime.inMilliseconds}ms');
-///   for (final entry in diag.fieldProvenance.entries) {
-///     print('${entry.key}: ${entry.value.source} (score: ${entry.value.score})');
-///   }
+/// print('Cache hit: ${diag.cacheHit}');
+/// print('Total time: ${diag.totalTime.inMilliseconds}ms');
+/// for (final entry in diag.fieldProvenance.entries) {
+///   print('${entry.key}: ${entry.value.source} (score: ${entry.value.score})');
 /// }
 /// ```
 class ExtractionDiagnostics {
@@ -426,7 +482,18 @@ class ExtractionDiagnostics {
   /// Total time for the extraction operation (including cache lookup and fetch).
   final Duration totalTime;
 
-  /// HTTP fetch diagnostics, or `null` if served from cache.
+  /// HTTP fetch diagnostics, or `null` when no document fetch is described.
+  ///
+  /// This is `null` when the client did not fetch the document, for example
+  /// for an invalid URL, a closed client, or a request that was cancelled or
+  /// timed out before fetching. It is also `null` for a cache hit on a
+  /// [CachePayloadKind.linkMetadata] entry, which does not store diagnostics.
+  ///
+  /// A cache hit on a [CachePayloadKind.extractionResult] entry returns the
+  /// fetch diagnostics stored when the entry was written. Check [cacheHit] to
+  /// tell them apart from a fresh fetch. [MetaLinkParser.parseResponse] reports
+  /// decode diagnostics here, while [MetaLinkParser.parseHtml] leaves it
+  /// `null`.
   final FetchDiagnostics? fetch;
 
   /// Maps each [MetaField] to its [FieldProvenance], showing which source won.
@@ -447,6 +514,13 @@ class ExtractionDiagnostics {
   /// such as a compact metadata-only cache entry.
   final Map<MetaField, List<CandidateDecision>> candidateDecisions;
 
+  /// A JSON-compatible map of these diagnostics.
+  ///
+  /// [totalTime] is written as whole milliseconds under `totalTimeMs`. [fetch]
+  /// is written as `null` or a [FetchDiagnostics.toJson] map. Provenance and
+  /// decision maps are keyed by [MetaField] name. The client stores this map in
+  /// [CachePayloadKind.extractionResult] cache entries, and
+  /// [ExtractionDiagnostics.fromJson] reads it back.
   Map<String, dynamic> toJson() {
     return <String, dynamic>{
       'cacheHit': cacheHit,
@@ -472,6 +546,21 @@ class ExtractionDiagnostics {
     };
   }
 
+  /// Creates an [ExtractionDiagnostics] from a map produced by [toJson].
+  ///
+  /// Parsing is lenient and does not throw for missing or malformed values.
+  /// Nested maps may be loosely typed, such as the `Map<dynamic, dynamic>`
+  /// values a custom [CacheStore] codec can return. Missing flags and
+  /// durations default to `false` and zero, except `provenanceAvailable`,
+  /// which defaults to `true` for payloads written before it existed.
+  ///
+  /// A missing or non-map `fetch` value becomes `null`. In the provenance and
+  /// decision maps, an entry is skipped when its key is not a [MetaField] name
+  /// or its value has the wrong shape: a `fieldProvenance` value must be a
+  /// map, and an `itemProvenance` or `candidateDecisions` value must be a
+  /// list. A string holding encoded JSON is not decoded. Within a list, each
+  /// element that is not a string-keyed map is skipped. Valid entries and
+  /// elements survive the ones that are skipped.
   factory ExtractionDiagnostics.fromJson(Map<String, dynamic> json) {
     final fpRaw = json.tryGetMap<String, dynamic>('fieldProvenance');
     final fp = <MetaField, FieldProvenance>{};
@@ -484,12 +573,17 @@ class ExtractionDiagnostics {
           entry.key,
           parser: EnumParsers.byName(MetaField.values),
         );
-        if (field != null) {
-          try {
-            fp[field] = FieldProvenance.fromJson(entry.value);
-          } catch (_) {
-            // Skip invalid entries to keep diagnostics parsing resilient.
-          }
+        // Accept loosely typed maps, such as Map<dynamic, dynamic> produced by
+        // a custom cache codec, the same way the list-valued sections do. The
+        // type check comes first because Convert would decode a JSON string.
+        final raw = entry.value;
+        if (field == null || raw is! Map) continue;
+        final value = Convert.tryToMap<String, dynamic>(raw);
+        if (value == null) continue;
+        try {
+          fp[field] = FieldProvenance.fromJson(value);
+        } catch (_) {
+          // Skip invalid entries to keep diagnostics parsing resilient.
         }
       }
     }
@@ -501,16 +595,15 @@ class ExtractionDiagnostics {
           entry.key,
           parser: EnumParsers.byName(MetaField.values),
         );
-        final values = Convert.tryToList<dynamic>(entry.value);
-        if (field == null || values == null) continue;
+        // Convert would wrap a scalar in a list and decode a JSON string, so
+        // a value that is not already a list is malformed and skipped.
+        final values = entry.value;
+        if (field == null || values is! List) continue;
 
-        itemProvenance[field] = values
-            .whereType<Map>()
-            .map(
-              (item) =>
-                  ItemProvenance.fromJson(Map<String, dynamic>.from(item)),
-            )
-            .toList(growable: false);
+        itemProvenance[field] = _jsonObjects(
+          values,
+          ItemProvenance.fromJson,
+        ).toList(growable: false);
       }
     }
 
@@ -521,17 +614,15 @@ class ExtractionDiagnostics {
           entry.key,
           parser: EnumParsers.byName(MetaField.values),
         );
-        final values = Convert.tryToList<dynamic>(entry.value);
-        if (field == null || values == null) continue;
+        // Convert would wrap a scalar in a list and decode a JSON string, so
+        // a value that is not already a list is malformed and skipped.
+        final values = entry.value;
+        if (field == null || values is! List) continue;
 
-        candidateDecisions[field] = values
-            .whereType<Map>()
-            .map(
-              (decision) => CandidateDecision.fromJson(
-                Map<String, dynamic>.from(decision),
-              ),
-            )
-            .toList(growable: false);
+        candidateDecisions[field] = _jsonObjects(
+          values,
+          CandidateDecision.fromJson,
+        ).toList(growable: false);
       }
     }
 
@@ -549,6 +640,23 @@ class ExtractionDiagnostics {
       itemProvenance: itemProvenance,
       candidateDecisions: candidateDecisions,
     );
+  }
+}
+
+/// Decodes every string-keyed map in [value] with [fromJson].
+///
+/// [value] may be a list or a single element. Elements that are not maps, or
+/// whose keys are not strings, are skipped so one malformed entry cannot
+/// discard its valid siblings.
+Iterable<T> _jsonObjects<T>(
+  Object? value,
+  T Function(Map<String, dynamic> json) fromJson,
+) sync* {
+  final elements = Convert.tryToList<dynamic>(value);
+  if (elements == null) return;
+  for (final element in elements) {
+    final map = Convert.tryToMap<String, dynamic>(element);
+    if (map != null) yield fromJson(map);
   }
 }
 

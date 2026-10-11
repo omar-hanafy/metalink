@@ -1,47 +1,41 @@
-// ignore_for_file: always_use_package_imports, unnecessary_library_name
-// Keep these ignores local to this library file while still exporting public APIs.
 /// Metadata extraction, pure parsing, request policy, caching, and diagnostics.
-library metalink;
+library;
 
 import 'dart:async';
 
-import 'src/client.dart';
-import 'src/options.dart';
-import 'src/result.dart';
-import 'src/cache/cache_store.dart';
-import 'src/model/link_metadata.dart';
-import 'src/network/request_context.dart';
+import 'package:metalink/src/cache/cache_store.dart';
+import 'package:metalink/src/client.dart';
+import 'package:metalink/src/model/link_metadata.dart';
+import 'package:metalink/src/network/request_context.dart';
+import 'package:metalink/src/options.dart';
+import 'package:metalink/src/result.dart';
 
-export 'src/client.dart';
-export 'src/options.dart';
-export 'src/result.dart';
-
-export 'src/fetch/fetcher.dart';
-export 'src/fetch/http_fetcher.dart';
-export 'src/network/request_context.dart';
-export 'src/network/request_engine.dart';
-export 'src/network/request_policy.dart';
-
-export 'src/parse/metalink_parser.dart';
-export 'src/parse/web_decoder.dart';
-export 'src/extract/candidate.dart';
-export 'src/extract/ranking.dart';
-
-export 'src/cache/cache_store.dart';
-export 'src/cache/cache_key.dart';
-export 'src/cache/memory_cache_store.dart';
-export 'src/cache/hive_cache_store.dart';
-
-export 'src/model/errors.dart';
-export 'src/model/diagnostics.dart';
-export 'src/model/raw_metadata.dart';
-export 'src/model/url_optimization.dart';
-export 'src/model/structured_data.dart';
-export 'src/model/media.dart';
-export 'src/model/icon.dart';
-export 'src/model/oembed.dart';
-export 'src/model/manifest.dart';
-export 'src/model/link_metadata.dart';
+export 'package:metalink/src/cache/cache_key.dart';
+export 'package:metalink/src/cache/cache_store.dart';
+export 'package:metalink/src/cache/hive_cache_store.dart';
+export 'package:metalink/src/cache/memory_cache_store.dart';
+export 'package:metalink/src/client.dart';
+export 'package:metalink/src/extract/candidate.dart';
+export 'package:metalink/src/extract/ranking.dart';
+export 'package:metalink/src/fetch/fetcher.dart';
+export 'package:metalink/src/fetch/http_fetcher.dart';
+export 'package:metalink/src/model/diagnostics.dart';
+export 'package:metalink/src/model/errors.dart';
+export 'package:metalink/src/model/icon.dart';
+export 'package:metalink/src/model/link_metadata.dart';
+export 'package:metalink/src/model/manifest.dart';
+export 'package:metalink/src/model/media.dart';
+export 'package:metalink/src/model/oembed.dart';
+export 'package:metalink/src/model/raw_metadata.dart';
+export 'package:metalink/src/model/structured_data.dart';
+export 'package:metalink/src/model/url_optimization.dart';
+export 'package:metalink/src/network/request_context.dart';
+export 'package:metalink/src/network/request_engine.dart';
+export 'package:metalink/src/network/request_policy.dart';
+export 'package:metalink/src/options.dart';
+export 'package:metalink/src/parse/metalink_parser.dart';
+export 'package:metalink/src/parse/web_decoder.dart';
+export 'package:metalink/src/result.dart';
 
 /// Convenience one-off API for link metadata extraction.
 ///

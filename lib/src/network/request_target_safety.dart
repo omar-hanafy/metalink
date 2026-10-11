@@ -1,12 +1,44 @@
+/// Returns why the host of [uri] is unsafe for an untrusted request, or `null`
+/// when its literal form passes every check.
+///
+/// `RequestPolicy.secure()` rejects a target whenever this returns a reason.
+/// The check inspects only the host text and never resolves DNS. It rejects:
+///
+/// * an empty host;
+/// * `localhost`, `metadata`, and names under `.localhost`, `.local`, or
+///   `.internal`;
+/// * standard hosts-file aliases for loopback, link-local, and multicast
+///   addresses, such as `localhost.localdomain`, `localhost4`, `localhost6`,
+///   `ip6-localhost`, and `ip6-loopback`, plus the AWS metadata name
+///   `instance-data`;
+/// * non-public IPv4 literals, plus numeric forms such as `2130706433` or
+///   `0x7f.0.0.1` that some resolvers read as addresses;
+/// * non-ASCII or percent-encoded host names, which must be supplied in their
+///   ASCII punycode (`xn--`) form instead;
+/// * IPv6 literals that [unsafeIpv6LiteralReason] rejects.
+///
+/// Trailing dots and letter case are ignored. A public host name can still
+/// resolve to a private address, so DNS validation and pinning remain the
+/// transport's responsibility.
 String? unsafeTargetReason(Uri uri) {
-  final host = uri.host.toLowerCase().replaceFirst(RegExp(r'\.$'), '');
+  final host = uri.host.toLowerCase().replaceFirst(RegExp(r'\.+$'), '');
   if (host.isEmpty) return 'The request target has no host.';
 
-  if (host == 'localhost' ||
+  // Dart's Uri keeps a non-ASCII host percent-encoded and never applies WHATWG
+  // or UTS #46 canonicalization, which maps fullwidth digits, ideographic full
+  // stops, and enclosed letters onto ASCII names such as `127.0.0.1` or
+  // `localhost`. The ASCII checks below would miss those mapped forms, so fail
+  // closed instead of reimplementing IDNA. Colon hosts are IPv6 literals and
+  // keep their own handling, including the zone-ID rejection.
+  if (!host.contains(':') && _isEncodedOrNonAscii(host)) {
+    return 'Non-ASCII and percent-encoded host names are not allowed. '
+        'Supply the ASCII punycode (xn--) form of an internationalized host.';
+  }
+
+  if (_localHostNames.contains(host) ||
       host.endsWith('.localhost') ||
       host.endsWith('.local') ||
-      host.endsWith('.internal') ||
-      host == 'metadata') {
+      host.endsWith('.internal')) {
     return 'Local and internal host names are not allowed.';
   }
 
@@ -24,6 +56,30 @@ String? unsafeTargetReason(Uri uri) {
   }
 
   return null;
+}
+
+// Exact names that resolve to loopback, link-local, multicast, or metadata
+// addresses through common hosts files or cloud DNS rather than through public
+// DNS. The `ip6-*` names are the Debian-family hosts-file aliases.
+const Set<String> _localHostNames = <String>{
+  'localhost',
+  'localhost.localdomain',
+  'localhost4',
+  'localhost4.localdomain4',
+  'localhost6',
+  'localhost6.localdomain6',
+  'ip6-localhost',
+  'ip6-loopback',
+  'ip6-localnet',
+  'ip6-mcastprefix',
+  'ip6-allnodes',
+  'ip6-allrouters',
+  'metadata',
+  'instance-data',
+};
+
+bool _isEncodedOrNonAscii(String host) {
+  return host.contains('%') || host.codeUnits.any((unit) => unit > 0x7f);
 }
 
 List<int>? _parseIpv4(String host) {

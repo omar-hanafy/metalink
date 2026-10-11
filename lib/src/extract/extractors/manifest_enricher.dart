@@ -1,17 +1,38 @@
 import 'dart:convert';
 
+import 'package:metalink/src/fetch/fetch_utils.dart';
 import 'package:metalink/src/fetch/fetcher.dart';
-import 'package:metalink/src/options.dart';
 import 'package:metalink/src/model/manifest.dart';
 import 'package:metalink/src/network/request_context.dart';
 import 'package:metalink/src/network/request_policy.dart';
+import 'package:metalink/src/options.dart';
 import 'package:metalink/src/util/json_utils.dart';
 
-import 'package:metalink/src/fetch/fetch_utils.dart';
-
+/// Fetches a web app manifest and parses it into [WebAppManifestData].
+///
+/// The extraction pipeline uses this for optional manifest enrichment after a
+/// `<link rel="manifest">` URL is discovered in the page. Parsing is
+/// best-effort: an unusable response yields `null`.
 class ManifestEnricher {
+  /// Creates a stateless manifest enricher.
   const ManifestEnricher();
 
+  /// Fetches [manifestUrl] with [fetcher] and parses the JSON manifest.
+  ///
+  /// The GET request follows redirects and applies the request policy,
+  /// timeouts, and redirect limits in [fetchOptions] for
+  /// [RequestPurpose.manifest]. When [requestContext] is given, its deadline
+  /// and cancellation signal also bound the request. The body is read up to
+  /// the smaller of `fetchOptions.maxBytes` and 512 KiB and decoded as UTF-8,
+  /// replacing malformed bytes.
+  ///
+  /// Returns `null` when the request fails, the final status is not 2xx, or
+  /// the body is not a JSON object. The returned
+  /// [WebAppManifestData.manifestUrl] is the final URL after redirects, and
+  /// `start_url` and each icon `src` are resolved against it. Text and URL
+  /// fields must be JSON strings; any other JSON value yields `null` for that
+  /// field. Icon entries that are not objects or have no string `src` are
+  /// skipped.
   Future<WebAppManifestData?> fetchAndParse({
     required Fetcher fetcher,
     required FetchOptions fetchOptions,
@@ -99,9 +120,11 @@ class ManifestEnricher {
     }
   }
 
+  // Only JSON strings are text: stringifying `false` or `42` would invent
+  // names and URLs such as `<manifest>/false`.
   static String? _asString(dynamic v) {
-    if (v == null) return null;
-    final s = v.toString().trim();
+    if (v is! String) return null;
+    final s = v.trim();
     return s.isEmpty ? null : s;
   }
 }

@@ -1,4 +1,8 @@
+/// @docImport 'package:metalink/src/client.dart';
+library;
+
 import 'package:convert_object/convert_object.dart';
+import 'package:metalink/src/model/json_uri.dart';
 
 /// Represents a single redirect step during URL resolution.
 ///
@@ -32,6 +36,10 @@ class RedirectHop {
   /// The raw `Location` header value, or `null` if not present.
   final String? location;
 
+  /// A JSON-compatible map of this hop.
+  ///
+  /// [from] and [to] are written as strings, and [location] as `null` when
+  /// absent. [RedirectHop.fromJson] reads this format back.
   Map<String, dynamic> toJson() {
     return <String, dynamic>{
       'from': from.toString(),
@@ -41,10 +49,15 @@ class RedirectHop {
     };
   }
 
+  /// Creates a [RedirectHop] from a map produced by [toJson].
+  ///
+  /// Parsing is lenient and does not throw for missing or malformed values:
+  /// missing or unparsable URLs become an empty [Uri], and a missing
+  /// `statusCode` becomes `0`.
   factory RedirectHop.fromJson(Map<String, dynamic> json) {
     return RedirectHop(
-      from: json.getUri('from', defaultValue: Uri()),
-      to: json.getUri('to', defaultValue: Uri()),
+      from: readJsonUri(json, 'from', defaultValue: Uri()),
+      to: readJsonUri(json, 'to', defaultValue: Uri()),
       statusCode: json.tryGetInt('statusCode') ?? 0,
       location: json.tryGetString('location'),
     );

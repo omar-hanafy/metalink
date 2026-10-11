@@ -1,4 +1,8 @@
+/// @docImport 'package:metalink/src/model/link_metadata.dart';
+library;
+
 import 'package:convert_object/convert_object.dart';
+import 'package:metalink/src/model/json_uri.dart';
 
 /// Represents an icon defined in a Web App Manifest.
 ///
@@ -29,6 +33,10 @@ class ManifestIcon {
   /// Icon purpose (e.g., `any`, `maskable`), or `null` if not declared.
   final String? purpose;
 
+  /// A JSON-compatible map of this manifest icon.
+  ///
+  /// [src] is written as a string, and absent optional values as `null`.
+  /// [ManifestIcon.fromJson] reads this format back.
   Map<String, dynamic> toJson() {
     return <String, dynamic>{
       'src': src.toString(),
@@ -38,9 +46,14 @@ class ManifestIcon {
     };
   }
 
+  /// Creates a [ManifestIcon] from a map produced by [toJson].
+  ///
+  /// Throws a `ConversionException` from `package:convert_object` when `src`
+  /// is missing or is not a valid URI. Optional values that cannot be
+  /// converted become `null`.
   factory ManifestIcon.fromJson(Map<String, dynamic> json) {
     return ManifestIcon(
-      src: json.getUri('src'),
+      src: readJsonUri(json, 'src'),
       sizes: json.tryGetString('sizes'),
       type: json.tryGetString('type'),
       purpose: json.tryGetString('purpose'),
@@ -109,6 +122,12 @@ class WebAppManifestData {
   /// Icons declared in the manifest. Empty list if none declared.
   final List<ManifestIcon> icons;
 
+  /// A JSON-compatible map of this manifest data.
+  ///
+  /// URLs are written as strings, [icons] as a list of [ManifestIcon.toJson]
+  /// maps, and absent optional values as `null`. Keys use the Dart field names,
+  /// such as `shortName`, not the raw manifest names such as `short_name`.
+  /// [WebAppManifestData.fromJson] reads this format back.
   Map<String, dynamic> toJson() {
     return <String, dynamic>{
       'manifestUrl': manifestUrl.toString(),
@@ -122,6 +141,13 @@ class WebAppManifestData {
     };
   }
 
+  /// Creates a [WebAppManifestData] from a map produced by [toJson].
+  ///
+  /// This reads the serialized model format, not a raw `manifest.json`
+  /// document. Throws a `ConversionException` from `package:convert_object`
+  /// when `manifestUrl` is missing or is not a valid URI. Optional values that
+  /// cannot be converted become `null`, and `icons` entries that are not maps
+  /// or that fail to decode are skipped.
   factory WebAppManifestData.fromJson(Map<String, dynamic> json) {
     final icons = <ManifestIcon>[];
     final rawIcons = json.tryGetList<dynamic>('icons');
@@ -140,10 +166,10 @@ class WebAppManifestData {
     }
 
     return WebAppManifestData(
-      manifestUrl: json.getUri('manifestUrl'),
+      manifestUrl: readJsonUri(json, 'manifestUrl'),
       name: json.tryGetString('name'),
       shortName: json.tryGetString('shortName'),
-      startUrl: json.tryGetUri('startUrl'),
+      startUrl: tryReadJsonUri(json, 'startUrl'),
       display: json.tryGetString('display'),
       backgroundColor: json.tryGetString('backgroundColor'),
       themeColor: json.tryGetString('themeColor'),

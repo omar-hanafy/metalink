@@ -1,11 +1,23 @@
 # Local and internal artifacts that are useful in the repository but should
 # not be included in the pub.dev archive.
+#
+# This file replaces the root .gitignore when publishing, so it must also
+# exclude local-only files that .gitignore normally hides. Unanchored patterns
+# match at any depth.
 **/.DS_Store
-/build/
-/coverage/
-/doc/api/
+*.class
+*.iml
+*.log
+*.pyc
+*.swp
+build/
+coverage/
+doc/api/
+/FOLLOWUP.md
 /docs_guide.md
 /examples/
+/lib/core/config/api_keys.dart
 /metalink_cache.hive
 /metalink_cache.lock
 /pubspec.lock
+/version

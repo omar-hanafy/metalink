@@ -1,8 +1,26 @@
+import 'package:metalink/src/extract/pipeline.dart';
 import 'package:metalink/src/model/diagnostics.dart';
 import 'package:metalink/src/model/oembed.dart';
-import 'package:metalink/src/extract/pipeline.dart';
 
+/// An extractor stage that reads `<link>` elements for the canonical URL,
+/// icons, oEmbed discovery endpoints, and the web app manifest.
+///
+/// `rel` values are matched as case-insensitive, whitespace-separated tokens,
+/// and each element contributes to at most one category, checked in the order
+/// canonical, manifest, oEmbed, icon. Canonical URLs and icons require
+/// `ExtractOptions.extractLinkRels`, `rel="alternate"` links whose `type`
+/// contains `oembed` require `ExtractOptions.enableOEmbed`, and manifest links
+/// require `ExtractOptions.enableManifest`; the stage does nothing when all
+/// three are disabled. Hrefs that do not resolve to absolute HTTP(S) URLs are
+/// skipped.
+///
+/// Every icon occurrence is emitted, including repeated URLs, so the
+/// pipeline's collection merge can keep the highest-scoring occurrence and
+/// fill its missing `sizes` and `type` from the others. Apple touch icons
+/// score above plain `icon` links, which score above `mask-icon`. Blank
+/// `sizes` and `type` attributes are reported as `null`.
 class LinkRelExtractor implements HtmlMetadataExtractorStage {
+  /// Creates the stateless link-rel extractor stage.
   const LinkRelExtractor();
 
   @override
@@ -15,7 +33,6 @@ class LinkRelExtractor implements HtmlMetadataExtractorStage {
 
     final doc = context.document;
 
-    final seenIconUrls = <String>{};
     final seenOembed = <String>{};
 
     for (final el in doc.querySelectorAll('link')) {
@@ -86,17 +103,18 @@ class LinkRelExtractor implements HtmlMetadataExtractorStage {
         continue;
       }
 
-      // Collect icon candidates and dedupe by URL to keep the icon list stable.
+      // Emit every icon occurrence. Deduplicating here would keep only the
+      // first occurrence of a URL and discard a later, higher-scoring or richer
+      // duplicate (for example an apple-touch-icon with sizes) before the
+      // pipeline's per-URL merge could use it.
       if (extractLinkRels && _isIconRel(tokens)) {
         final uri = context.urlResolver.resolve(context.baseUrl, hrefRaw);
         if (uri == null) continue;
 
-        final key = uri.toString();
-        if (!seenIconUrls.add(key)) continue;
-
-        final sizes = (el.attributes['sizes'] ?? el.attributes['SIZES'])
-            ?.trim();
-        final type = (el.attributes['type'] ?? el.attributes['TYPE'])?.trim();
+        final sizes = _nonBlank(
+          el.attributes['sizes'] ?? el.attributes['SIZES'],
+        );
+        final type = _nonBlank(typeAttr);
 
         context.addIconUri(
           uri,
@@ -109,6 +127,12 @@ class LinkRelExtractor implements HtmlMetadataExtractorStage {
         );
       }
     }
+  }
+
+  // Treats blank attributes as absent so they cannot block a later fill.
+  static String? _nonBlank(String? value) {
+    final trimmed = value?.trim();
+    return trimmed == null || trimmed.isEmpty ? null : trimmed;
   }
 
   static bool _isIconRel(Set<String> tokens) {

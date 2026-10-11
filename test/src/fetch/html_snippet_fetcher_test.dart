@@ -1,11 +1,15 @@
 import 'dart:convert';
 
+import 'package:http/http.dart' as http;
+import 'package:metalink/src/fetch/fetcher.dart';
 import 'package:metalink/src/fetch/html_snippet_fetcher.dart';
+import 'package:metalink/src/fetch/http_fetcher.dart';
 import 'package:metalink/src/model/diagnostics.dart';
 import 'package:metalink/src/options.dart';
 import 'package:test/test.dart';
 
 import '../../support/fake_fetcher.dart';
+import '../../support/fake_http_client.dart';
 
 void main() {
   test('document requests use the stable default user-agent', () async {
@@ -21,9 +25,8 @@ void main() {
       ),
     );
 
-    await HtmlSnippetFetcher(
-      fetcher: fetcher,
-    ).fetch(url, options: const FetchOptions(stopAfterHead: false));
+    await HtmlSnippetFetcher(fetcher: fetcher)
+        .fetch(url, options: const FetchOptions(stopAfterHead: false));
 
     expect(
       fetcher.requests.single.headers?['user-agent'],
@@ -113,6 +116,47 @@ void main() {
     final result = await snippet.fetch(url, options: const FetchOptions());
     expect(result.statusCode, 200);
     expect(result.bodyText, isNotNull);
+  });
+
+  test('falls back to GET when one HEAD attempt times out', () async {
+    final client = RecordingHttpClient(
+      handler: (request) async {
+        if (request.method == 'HEAD') {
+          // Never answer HEAD; only HttpFetcher's per-attempt abort ends it.
+          await (request as http.AbortableRequest).abortTrigger;
+          throw http.RequestAbortedException(request.url);
+        }
+        return stringResponse(
+          '<html><head><title>Fallback</title></head></html>',
+          200,
+          headers: const {'content-type': 'text/html'},
+        );
+      },
+    );
+    final fetcher = HttpFetcher(
+      client: client,
+      capabilities: const FetcherCapabilities(
+        supportsAbort: true,
+        redirectHandling: RedirectHandlingCapability.inspectable,
+      ),
+    );
+    addTearDown(fetcher.close);
+
+    final result = await HtmlSnippetFetcher(fetcher: fetcher).fetch(
+      Uri.parse('https://slow-head.test/page'),
+      options: const FetchOptions(
+        timeout: Duration(milliseconds: 50),
+        totalTimeout: Duration(seconds: 10),
+      ),
+    );
+
+    expect(result.error, isNull);
+    expect(result.statusCode, 200);
+    expect(result.bodyText, contains('Fallback'));
+    expect(client.requests.map((request) => request.method), <String>[
+      'HEAD',
+      'GET',
+    ]);
   });
 
   test('GET redirect chain works when stopAfterHead is false', () async {

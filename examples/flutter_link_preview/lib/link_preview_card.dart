@@ -1,3 +1,6 @@
+import 'dart:async';
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:metalink/metalink.dart';
@@ -18,17 +21,39 @@ class LinkPreviewCard extends StatelessWidget {
   final bool cacheHit;
   final String? titleSource;
 
+  /// Width of the image column in the side-by-side layout.
+  static const double _wideImageWidth = 380;
+
+  /// Narrowest text column, at 1x text, that still reads well beside the
+  /// image. It grows with the text scale so large text switches to the
+  /// stacked layout instead of squeezing into a tall, narrow column.
+  static const double _minWideBodyWidth = 340;
+
+  /// Minimum height of the side-by-side layout, so short metadata still gets
+  /// a generous image. Longer content makes the card taller.
+  static const double _minWideHeight = 440;
+
+  /// Font size used to turn the platform [TextScaler] into a layout factor.
+  static const double _referenceFontSize = 16;
+
   @override
   Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final textScale =
+        MediaQuery.textScalerOf(context).scale(_referenceFontSize) /
+        _referenceFontSize;
+
     return LayoutBuilder(
       builder: (context, constraints) {
-        final wide = constraints.maxWidth >= 720;
+        final wide =
+            constraints.maxWidth >=
+            _wideImageWidth + _minWideBodyWidth * math.max(1, textScale);
         return Container(
           clipBehavior: Clip.antiAlias,
           decoration: BoxDecoration(
-            color: Colors.white.withValues(alpha: 0.92),
+            color: colorScheme.surfaceContainerLowest.withValues(alpha: 0.92),
             borderRadius: BorderRadius.circular(30),
-            border: Border.all(color: Colors.white),
+            border: Border.all(color: colorScheme.surfaceContainerLowest),
             boxShadow: const [
               BoxShadow(
                 color: Color(0x1E17112E),
@@ -38,15 +63,29 @@ class LinkPreviewCard extends StatelessWidget {
             ],
           ),
           child: wide
-              ? SizedBox(
-                  height: 440,
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      SizedBox(width: 380, child: _buildImage(context)),
-                      Expanded(child: _buildBody(context)),
-                    ],
-                  ),
+              // The text column decides the card height; the image fills
+              // whatever height the text needs, so nothing is clipped.
+              ? Stack(
+                  children: [
+                    PositionedDirectional(
+                      start: 0,
+                      top: 0,
+                      bottom: 0,
+                      width: _wideImageWidth,
+                      child: _buildImage(context),
+                    ),
+                    ConstrainedBox(
+                      constraints: const BoxConstraints(
+                        minHeight: _minWideHeight,
+                      ),
+                      child: Padding(
+                        padding: const EdgeInsetsDirectional.only(
+                          start: _wideImageWidth,
+                        ),
+                        child: _buildBody(context),
+                      ),
+                    ),
+                  ],
                 )
               : Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -69,6 +108,8 @@ class LinkPreviewCard extends StatelessWidget {
     return Stack(
       fit: StackFit.expand,
       children: [
+        // Page-supplied URL: Flutter's image loader does not apply MetaLink's
+        // request policy. See "Request safety and images" in the README.
         Image.network(
           image.url.toString(),
           fit: BoxFit.cover,
@@ -217,7 +258,19 @@ class _LinkPreviewSkeletonState extends State<LinkPreviewSkeleton>
   late final AnimationController _controller = AnimationController(
     vsync: this,
     duration: const Duration(milliseconds: 1000),
-  )..repeat(reverse: true);
+  );
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // Respect the platform "reduce motion" setting: show a static placeholder
+    // instead of an endless pulse.
+    if (MediaQuery.disableAnimationsOf(context)) {
+      _controller.stop();
+    } else if (!_controller.isAnimating) {
+      unawaited(_controller.repeat(reverse: true));
+    }
+  }
 
   @override
   void dispose() {
@@ -227,58 +280,63 @@ class _LinkPreviewSkeletonState extends State<LinkPreviewSkeleton>
 
   @override
   Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: _controller,
-      builder: (context, _) {
-        final color = Color.lerp(
-          const Color(0xFFECE8F4),
-          const Color(0xFFF8F6FC),
-          _controller.value,
-        )!;
-        return Container(
-          height: 360,
-          padding: const EdgeInsets.all(24),
-          decoration: BoxDecoration(
-            color: Colors.white.withValues(alpha: 0.72),
-            borderRadius: BorderRadius.circular(30),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Expanded(
-                child: Container(
-                  decoration: BoxDecoration(
-                    color: color,
-                    borderRadius: BorderRadius.circular(20),
+    final colorScheme = Theme.of(context).colorScheme;
+    return Semantics(
+      label: 'Loading link preview',
+      container: true,
+      child: AnimatedBuilder(
+        animation: _controller,
+        builder: (context, _) {
+          final color = Color.lerp(
+            colorScheme.surfaceContainerHigh,
+            colorScheme.surfaceContainerLow,
+            _controller.value,
+          )!;
+          return Container(
+            height: 360,
+            padding: const EdgeInsets.all(24),
+            decoration: BoxDecoration(
+              color: colorScheme.surfaceContainerLowest.withValues(alpha: 0.72),
+              borderRadius: BorderRadius.circular(30),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color: color,
+                      borderRadius: BorderRadius.circular(20),
+                    ),
                   ),
                 ),
-              ),
-              const SizedBox(height: 20),
-              FractionallySizedBox(
-                widthFactor: 0.7,
-                child: Container(
-                  height: 24,
-                  decoration: BoxDecoration(
-                    color: color,
-                    borderRadius: BorderRadius.circular(8),
+                const SizedBox(height: 20),
+                FractionallySizedBox(
+                  widthFactor: 0.7,
+                  child: Container(
+                    height: 24,
+                    decoration: BoxDecoration(
+                      color: color,
+                      borderRadius: BorderRadius.circular(8),
+                    ),
                   ),
                 ),
-              ),
-              const SizedBox(height: 12),
-              FractionallySizedBox(
-                widthFactor: 0.9,
-                child: Container(
-                  height: 14,
-                  decoration: BoxDecoration(
-                    color: color,
-                    borderRadius: BorderRadius.circular(8),
+                const SizedBox(height: 12),
+                FractionallySizedBox(
+                  widthFactor: 0.9,
+                  child: Container(
+                    height: 14,
+                    decoration: BoxDecoration(
+                      color: color,
+                      borderRadius: BorderRadius.circular(8),
+                    ),
                   ),
                 ),
-              ),
-            ],
-          ),
-        );
-      },
+              ],
+            ),
+          );
+        },
+      ),
     );
   }
 }
@@ -324,6 +382,8 @@ class _Favicon extends StatelessWidget {
     if (value == null) return fallback;
 
     return ClipOval(
+      // Page-supplied URL: Flutter's image loader does not apply MetaLink's
+      // request policy. See "Request safety and images" in the README.
       child: Image.network(
         value.toString(),
         width: 40,
@@ -383,7 +443,7 @@ class _DiagnosticChip extends StatelessWidget {
           children: [
             Icon(icon, size: 15, color: theme.colorScheme.primary),
             const SizedBox(width: 6),
-            Text(label, style: theme.textTheme.labelMedium),
+            Flexible(child: Text(label, style: theme.textTheme.labelMedium)),
           ],
         ),
       ),

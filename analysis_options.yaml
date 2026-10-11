@@ -1,36 +1,19 @@
-# analysis_options.yaml - publishable packages focus
-# Conservative defaults + strict import/pubspec hygiene for pub.dev
+# analysis_options.yaml - public pure-Dart package published to pub.dev.
+#
+# Based on the dart-lints `dart-package` template. Rule names were validated
+# against the linter rule list for Dart 3.13.5 on 2026-10-11.
+#
+# Strict `lib/`, quiet `test/`, relaxed `example/`: the analyzer applies the
+# nearest options file, so test/analysis_options.yaml and
+# example/analysis_options.yaml relax documentation and API-shape rules without
+# weakening the library itself. Line length and trailing commas are owned by the
+# Dart formatter.
 
 include: package:lints/recommended.yaml
 
-linter:
-  rules:
-    # --- Hygiene that directly affects publishability / maintainability ---
-    always_use_package_imports: true
-    avoid_relative_lib_imports: true
-    depend_on_referenced_packages: true
-    implementation_imports: true
-    public_member_api_docs: false
-    secure_pubspec_urls: true               # https:// URLs in pubspec
-
-    library_private_types_in_public_api: true
-
-    # --- Sensible preferences that rarely cause churn ---
-    prefer_single_quotes: true
-    prefer_const_constructors: true
-    sort_pub_dependencies: true
-
-    # --- Turn OFF chatty / conflicting style nits ---
-    prefer_relative_imports: false          # conflicts with package imports
-    lines_longer_than_80_chars: true       # let formatter/IDE handle this
-    constant_identifier_names: false        # don’t fight existing APIs
-    avoid_print: false                      # allow prints in packages by default
-    avoid_redundant_argument_values: false
-
-    # You can re-enable more rules later per repo as you like.
-
 analyzer:
-  # Keep analyzer from touching codegen / tool output
+  language:
+    strict-inference: true
   exclude:
     - "**/*.g.dart"
     - "**/*.freezed.dart"
@@ -38,31 +21,76 @@ analyzer:
     - "**/*.mocks.dart"
     - "**/*.gen.dart"
     - "**/*.gql.dart"
+    - "**/*.config.dart"
     - "lib/generated/**"
     - "lib/**/generated/**"
     - "build/**"
     - ".dart_tool/**"
+    # The Flutter showcase is a separate application with its own options.
     - "examples/**"
-
-  # Escalate only the things that matter for publish; keep noise low.
   errors:
-    # Publish-safety: FAIL the build if these are violated
+    # Publish safety: fail analysis outright when these are violated.
     always_use_package_imports: error
     avoid_relative_lib_imports: error
     depend_on_referenced_packages: error
     implementation_imports: error
     secure_pubspec_urls: error
-
-    # Keep these helpful but non-blocking
-    library_private_types_in_public_api: warning
-    directives_ordering: warning
-    use_key_in_widget_constructors: warning        # useful in Flutter libs
-    deprecated_member_use_from_same_package: warning
+    # Surface likely bugs above routine style infos in editors.
     unawaited_futures: warning
-    comment_references: info
-    public_member_api_docs: error                   # pana/doc coverage is separate
+    library_private_types_in_public_api: warning
+    deprecated_member_use_from_same_package: warning
 
-    # Quiet common time-wasters
-    constant_identifier_names: ignore
-    lines_longer_than_80_chars: ignore
-    prefer_relative_imports: ignore
+linter:
+  rules:
+    # --- type safety (Dart 3.13 lint replacements for strict-casts and
+    # strict-raw-types) ---
+    no_dynamic_casts: true
+    no_raw_types: true
+    # --- async & resource safety ---
+    unawaited_futures: true
+    avoid_slow_async_io: true
+    cancel_subscriptions: true
+    # --- correctness ---
+    avoid_type_to_string: true
+    test_types_in_equals: true
+    throw_in_finally: true
+    only_throw_errors: true
+    unnecessary_statements: true
+    no_self_assignments: true
+    no_literal_bool_comparisons: true
+    # --- import & pubspec hygiene ---
+    always_use_package_imports: true
+    avoid_relative_lib_imports: true
+    depend_on_referenced_packages: true
+    implementation_imports: true
+    directives_ordering: true
+    combinators_ordering: true
+    secure_pubspec_urls: true
+    sort_pub_dependencies: true
+    # --- style consistency (autofixable) ---
+    prefer_single_quotes: true
+    prefer_const_constructors: true
+    unnecessary_parenthesis: true
+    avoid_multiple_declarations_per_line: true
+    avoid_bool_literals_in_conditional_expressions: true
+    matching_super_parameters: true
+    use_string_buffers: true
+    use_enums: true
+    # --- team hygiene ---
+    document_ignores: true # every `// ignore:` must say why
+    # --- public API quality (pub.dev) ---
+    public_member_api_docs: true
+    comment_references: true
+    library_private_types_in_public_api: true
+    avoid_positional_boolean_parameters: true
+    avoid_equals_and_hash_code_on_mutable_classes: true
+    use_setters_to_change_properties: true
+    avoid_returning_this: true
+    prefer_asserts_with_message: true
+    deprecated_member_use_from_same_package: true
+    avoid_print: true # packages report through results and log sinks
+    # --- deliberate project choices ---
+    # Existing public constant names are part of the released API.
+    constant_identifier_names: false
+    # Conflicts with always_use_package_imports.
+    prefer_relative_imports: false

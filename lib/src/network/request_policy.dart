@@ -78,10 +78,14 @@ class RequestPolicyDecision {
 }
 
 /// Validates one logical or proxy request target.
-typedef RequestTargetValidator =
-    FutureOr<RequestPolicyDecision> Function(RequestTarget target);
+typedef RequestTargetValidator = FutureOr<RequestPolicyDecision> Function(
+  RequestTarget target,
+);
 
-/// Security and trust-boundary rules for [RequestEngine].
+/// Security and trust-boundary rules applied to every MetaLink request.
+///
+/// The request engine (`RequestEngine`) consults this policy for each initial,
+/// redirect, and proxy target, and when choosing which headers to forward.
 ///
 /// The default constructor preserves MetaLink 2.x target compatibility by
 /// allowing all valid HTTP(S) hosts. Sensitive headers are still removed when
@@ -97,37 +101,81 @@ class RequestPolicy {
     this.forwardSensitiveHeadersThroughProxy = true,
     this.requireInspectableRedirects = false,
     this.sensitiveHeaders = _defaultSensitiveHeaders,
-  }) : assert(cachePartition != '');
+  }) : assert(
+         cachePartition != '',
+         'cachePartition must not be empty; it keeps cached results from '
+         'different policies apart.',
+       );
 
   /// Creates a stricter preset for processing untrusted URLs.
   ///
   /// This blocks common local, private-literal, link-local, multicast, and
   /// metadata-service targets, requires inspectable redirect hops, prevents
-  /// sensitive headers from traversing a URL-rewrite proxy, and composes an
-  /// optional [additionalValidator]. Hostname-to-address validation and DNS
-  /// pinning still belong in a policy-aware platform transport.
+  /// sensitive headers and URL userinfo from traversing a URL-rewrite proxy,
+  /// and composes an optional [additionalValidator]. Hostname-to-address
+  /// validation and DNS pinning still belong in a policy-aware platform
+  /// transport.
+  ///
+  /// Non-ASCII and percent-encoded host names are rejected because Unicode
+  /// host canonicalization can map them onto loopback, metadata-service, or
+  /// local names. Supply internationalized hosts in their ASCII punycode
+  /// (`xn--`) form instead.
+  ///
+  /// Called without [additionalValidator] or [proxyTargetValidator] and with
+  /// the default `'secure'` [cachePartition], this returns the same shared
+  /// instance every time, so `identical(RequestPolicy.secure(),
+  /// RequestPolicy.secure())` is `true`. A [RequestPolicy] is immutable, so
+  /// sharing it is safe. Concurrent `MetaLinkClient.extract` calls that each
+  /// pass `RequestPolicy.secure()` therefore use the same policy object and
+  /// share a rejection instead of each retrying the request. Any other call
+  /// returns a new instance with its own validators.
   factory RequestPolicy.secure({
     RequestTargetValidator? additionalValidator,
     RequestTargetValidator? proxyTargetValidator,
     String cachePartition = 'secure',
   }) {
-    return RequestPolicy(
-      targetValidator: (target) async {
-        final unsafeReason = unsafeTargetReason(target.uri);
-        if (unsafeReason != null) {
-          return RequestPolicyDecision.reject(unsafeReason);
-        }
-        if (additionalValidator == null) {
-          return const RequestPolicyDecision.allow();
-        }
-        return additionalValidator(target);
-      },
+    if (additionalValidator == null &&
+        proxyTargetValidator == null &&
+        cachePartition == _securePartition) {
+      return _sharedSecure;
+    }
+    return RequestPolicy._secure(
+      additionalValidator: additionalValidator,
       proxyTargetValidator: proxyTargetValidator,
       cachePartition: cachePartition,
-      forwardSensitiveHeadersThroughProxy: false,
-      requireInspectableRedirects: true,
     );
   }
+
+  RequestPolicy._secure({
+    required RequestTargetValidator? additionalValidator,
+    required RequestTargetValidator? proxyTargetValidator,
+    required String cachePartition,
+  }) : this(
+         targetValidator: (target) async {
+           final unsafeReason = unsafeTargetReason(target.uri);
+           if (unsafeReason != null) {
+             return RequestPolicyDecision.reject(unsafeReason);
+           }
+           if (additionalValidator == null) {
+             return const RequestPolicyDecision.allow();
+           }
+           return additionalValidator(target);
+         },
+         proxyTargetValidator: proxyTargetValidator,
+         cachePartition: cachePartition,
+         forwardSensitiveHeadersThroughProxy: false,
+         requireInspectableRedirects: true,
+       );
+
+  /// The default [cachePartition] of [RequestPolicy.secure].
+  static const String _securePartition = 'secure';
+
+  /// The instance [RequestPolicy.secure] returns for its default preset.
+  static final RequestPolicy _sharedSecure = RequestPolicy._secure(
+    additionalValidator: null,
+    proxyTargetValidator: null,
+    cachePartition: _securePartition,
+  );
 
   static const Set<String> _defaultSensitiveHeaders = <String>{
     'authorization',
@@ -149,13 +197,24 @@ class RequestPolicy {
   /// whenever those validators can change which targets or redirects are valid.
   final String cachePartition;
 
-  /// Whether sensitive headers are removed when redirect origin changes.
+  /// Whether credentials are removed when a redirect changes origin.
+  ///
+  /// This covers [sensitiveHeaders] and any `user:password@` userinfo in the
+  /// redirect target, which clients such as `dart:io` send as
+  /// `Authorization: Basic`.
   final bool stripSensitiveHeadersOnCrossOriginRedirect;
 
   /// Whether document credentials may be sent to discovered enrichment URLs.
+  ///
+  /// This governs [sensitiveHeaders]. URL userinfo, which relative enrichment
+  /// URLs inherit from the document URL, is never sent to oEmbed, manifest, or
+  /// other enrichment requests.
   final bool forwardSensitiveHeadersToEnrichments;
 
   /// Whether sensitive target headers may be sent through a rewrite proxy.
+  ///
+  /// When `false`, the target's `user:password@` userinfo is also left out of
+  /// the rewritten proxy URL.
   final bool forwardSensitiveHeadersThroughProxy;
 
   /// Whether a transport with hidden redirect behavior must be rejected.

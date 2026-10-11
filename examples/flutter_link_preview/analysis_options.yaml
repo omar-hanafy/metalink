@@ -1,1 +1,75 @@
+# analysis_options.yaml - private Flutter app (not published to pub.dev).
+#
+# Based on the dart-lints `flutter-app` template. Rule names were validated
+# against the linter rule list for Dart 3.13.5 on 2026-10-11.
+#
+# test/analysis_options.yaml relaxes documentation and const rules for tests
+# without weakening lib/. Line length and trailing commas are owned by the
+# Dart formatter.
+
 include: package:flutter_lints/flutter.yaml
+
+analyzer:
+  language:
+    strict-inference: true
+  exclude:
+    # Generated code.
+    - "**/*.g.dart"
+    - "**/*.freezed.dart"
+    - "**/*.mocks.dart"
+    - "**/*.gr.dart"
+    - "**/*.config.dart"
+    # Build output and platform runners (added by the Flutter tool).
+    - build/**
+    - android/**
+    - ios/**
+    - windows/**
+    - macos/**
+    - linux/**
+
+linter:
+  rules:
+    # --- type strictness (Dart 3.13 rules replacing strict-casts/raw-types) ---
+    no_dynamic_casts: true
+    no_raw_types: true
+    # --- async & resource safety ---
+    unawaited_futures: true
+    avoid_slow_async_io: true
+    cancel_subscriptions: true
+    # --- correctness ---
+    avoid_type_to_string: true
+    test_types_in_equals: true
+    throw_in_finally: true
+    only_throw_errors: true
+    unnecessary_statements: true
+    no_self_assignments: true
+    no_literal_bool_comparisons: true
+    # --- import hygiene ---
+    always_use_package_imports: true
+    directives_ordering: true
+    combinators_ordering: true
+    # --- style consistency (autofixable) ---
+    prefer_single_quotes: true
+    unnecessary_parenthesis: true
+    avoid_multiple_declarations_per_line: true
+    avoid_bool_literals_in_conditional_expressions: true
+    matching_super_parameters: true
+    use_string_buffers: true
+    use_enums: true
+    # --- team hygiene ---
+    document_ignores: true # every `// ignore:` must say why
+    # --- flutter perf & widgets ---
+    prefer_const_constructors: true
+    prefer_const_literals_to_create_immutables: true
+    use_colored_box: true
+    use_decorated_box: true
+    sized_box_shrink_expand: true
+
+    # --- stricter (uncomment to tighten; test.yaml already silences these in tests) ---
+    # prefer_final_locals: true
+    # prefer_final_in_for_each: true
+    # avoid_dynamic_calls: true
+    # discarded_futures: true
+    # avoid_catches_without_on_clauses: true
+    # unnecessary_lambdas: true
+    # cascade_invocations: true

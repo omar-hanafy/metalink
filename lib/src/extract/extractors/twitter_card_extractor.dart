@@ -1,29 +1,44 @@
-import 'package:metalink/src/model/diagnostics.dart';
 import 'package:metalink/src/extract/pipeline.dart';
+import 'package:metalink/src/model/diagnostics.dart';
+import 'package:metalink/src/util/html_utils.dart';
 
+/// An extractor stage that reads Twitter (X) card meta tags.
+///
+/// Emits `twitter:title`, `twitter:description`, `twitter:creator` (as the
+/// author), `twitter:image` with `twitter:image:src` as its fallback, and
+/// `twitter:player` as a video candidate. Scores rank below Open Graph so
+/// Twitter tags act as a fallback when both are present.
+///
+/// Keys match ASCII case-insensitively. The `name` attribute is preferred,
+/// with `property` used only when no `name` tag has a usable value. Text fields
+/// use the first non-empty value; URL fields use the first value that resolves
+/// to an absolute HTTP(S) URL, so an unusable `twitter:image` such as a
+/// `data:` URL falls back to `twitter:image:src`. Does nothing when
+/// `ExtractOptions.extractTwitterCard` is `false`.
 class TwitterCardExtractor implements HtmlMetadataExtractorStage {
+  /// Creates the stateless Twitter card extractor stage.
   const TwitterCardExtractor();
 
   @override
   void extract(HtmlExtractContext context) {
     if (!context.extractOptions.extractTwitterCard) return;
 
-    final doc = context.document;
+    final meta = context.metaTags;
 
-    String? metaByName(String name) {
-      // Twitter tags are usually in "name", but some pages use "property", so check both.
-      final byName =
-          doc.querySelector('meta[name="$name"]')?.attributes['content'] ??
-          doc.querySelector('meta[name="$name"]')?.attributes['value'];
-      if (byName != null && byName.trim().isNotEmpty) return byName.trim();
+    // Twitter tags are usually in "name", but some pages use "property", so
+    // values are ordered by key, then by attribute, then by document order.
+    List<String> valuesFor(List<String> keys) => <String>[
+      for (final key in keys)
+        for (final attribute in _attributePriority)
+          for (final tag in meta.find([key], attributes: {attribute}))
+            ?tag.content,
+    ];
 
-      final byProp =
-          doc.querySelector('meta[property="$name"]')?.attributes['content'] ??
-          doc.querySelector('meta[property="$name"]')?.attributes['value'];
-      if (byProp != null && byProp.trim().isNotEmpty) return byProp.trim();
+    String? metaByName(String name) => valuesFor([name]).firstOrNull;
 
-      return null;
-    }
+    Uri? urlFor(List<String> keys) => context.urlResolver
+        .resolveAll(context.baseUrl, valuesFor(keys))
+        .firstOrNull;
 
     final title = metaByName('twitter:title');
     if (title != null) {
@@ -55,9 +70,7 @@ class TwitterCardExtractor implements HtmlMetadataExtractorStage {
       );
     }
 
-    final image =
-        metaByName('twitter:image') ?? metaByName('twitter:image:src');
-    final imageUri = context.urlResolver.resolve(context.baseUrl, image);
+    final imageUri = urlFor(const ['twitter:image', 'twitter:image:src']);
     if (imageUri != null) {
       context.addImageUri(
         imageUri,
@@ -68,8 +81,7 @@ class TwitterCardExtractor implements HtmlMetadataExtractorStage {
     }
 
     // Player cards may expose an embeddable URL used for rich previews.
-    final player = metaByName('twitter:player');
-    final playerUri = context.urlResolver.resolve(context.baseUrl, player);
+    final playerUri = urlFor(const ['twitter:player']);
     if (playerUri != null) {
       context.addVideoUri(
         playerUri,
@@ -80,6 +92,11 @@ class TwitterCardExtractor implements HtmlMetadataExtractorStage {
     }
   }
 }
+
+const List<MetaKeyAttribute> _attributePriority = <MetaKeyAttribute>[
+  MetaKeyAttribute.name,
+  MetaKeyAttribute.property,
+];
 
 const double _scoreTitle = 0.85;
 const double _scoreDescription = 0.80;
