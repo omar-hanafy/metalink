@@ -1,7 +1,27 @@
-import 'package:metalink/src/model/diagnostics.dart';
 import 'package:metalink/src/extract/pipeline.dart';
+import 'package:metalink/src/model/diagnostics.dart';
+import 'package:metalink/src/util/date_utils.dart';
+import 'package:metalink/src/util/html_utils.dart';
 
+/// An extractor stage that reads generic HTML metadata: the document
+/// `<title>`, the first `<h1>`, `html[lang]`, and standard `<meta>` tags.
+///
+/// Emits low-confidence fallbacks for the title, description, site name
+/// (`application-name` or `apple-mobile-web-app-title`), locale
+/// (`content-language` or `language`), keywords, author, and publish and
+/// modify dates, so richer sources such as Open Graph win when present. Only
+/// a `<title>` in the HTML namespace counts, so an inline SVG `<title>` is
+/// ignored.
+///
+/// `name`, `property`, and `http-equiv` keys match ASCII case-insensitively,
+/// and for each key the first non-empty tag in document order is used. Dates
+/// instead use the first value, in key priority and then document order, that
+/// parses as a timestamp, so a placeholder such as `TBD` does not hide a
+/// later valid date. The `keywords` value is split on commas and semicolons
+/// and deduplicated case-insensitively. Does nothing when
+/// `ExtractOptions.extractStandardMeta` is `false`.
 class StandardMetaExtractor implements HtmlMetadataExtractorStage {
+  /// Creates the stateless standard-meta extractor stage.
   const StandardMetaExtractor();
 
   @override
@@ -9,9 +29,15 @@ class StandardMetaExtractor implements HtmlMetadataExtractorStage {
     if (!context.extractOptions.extractStandardMeta) return;
 
     final doc = context.document;
+    final meta = context.metaTags;
 
-    // Use <title> as a baseline title when richer metadata is missing.
-    final titleEl = doc.querySelector('title');
+    // Use <title> as a baseline title when richer metadata is missing. Like
+    // the HTML document title, only a title element in the HTML namespace
+    // counts, so an inline SVG <title> tooltip is ignored.
+    final titleEl = doc
+        .getElementsByTagName('title')
+        .where((element) => element.namespaceUri == _htmlNamespace)
+        .firstOrNull;
     final title = _cleanText(titleEl?.text);
     if (title != null) {
       context.addTitle(
@@ -35,8 +61,8 @@ class StandardMetaExtractor implements HtmlMetadataExtractorStage {
 
     // Use standard meta description as a summary fallback.
     final desc =
-        _metaContent(doc, name: 'description') ??
-        _metaContent(doc, property: 'description');
+        _metaContent(meta, name: 'description') ??
+        _metaContent(meta, property: 'description');
     if (desc != null) {
       context.addDescription(
         desc,
@@ -48,8 +74,8 @@ class StandardMetaExtractor implements HtmlMetadataExtractorStage {
 
     // Use application-name tags as site name hints when present.
     final appName =
-        _metaContent(doc, name: 'application-name') ??
-        _metaContent(doc, name: 'apple-mobile-web-app-title');
+        _metaContent(meta, name: 'application-name') ??
+        _metaContent(meta, name: 'apple-mobile-web-app-title');
     if (appName != null) {
       context.addSiteName(
         appName,
@@ -71,8 +97,8 @@ class StandardMetaExtractor implements HtmlMetadataExtractorStage {
     }
 
     final contentLanguage =
-        _metaContent(doc, httpEquiv: 'content-language') ??
-        _metaContent(doc, name: 'language');
+        _metaContent(meta, httpEquiv: 'content-language') ??
+        _metaContent(meta, name: 'language');
     if (contentLanguage != null) {
       context.addLocale(
         contentLanguage,
@@ -83,7 +109,7 @@ class StandardMetaExtractor implements HtmlMetadataExtractorStage {
     }
 
     // Split keywords into individual tags for downstream filtering.
-    final keywordsRaw = _metaContent(doc, name: 'keywords');
+    final keywordsRaw = _metaContent(meta, name: 'keywords');
     if (keywordsRaw != null) {
       final parts = keywordsRaw
           .split(RegExp(r'[;,]'))
@@ -106,8 +132,8 @@ class StandardMetaExtractor implements HtmlMetadataExtractorStage {
 
     // Use author meta tags for attribution when other sources are absent.
     final author =
-        _metaContent(doc, name: 'author') ??
-        _metaContent(doc, property: 'author');
+        _metaContent(meta, name: 'author') ??
+        _metaContent(meta, property: 'author');
     if (author != null) {
       context.addAuthor(
         author,
@@ -118,15 +144,15 @@ class StandardMetaExtractor implements HtmlMetadataExtractorStage {
     }
 
     // Parse common publish and modify tags to populate timeline fields.
-    final publishedRaw =
-        _metaContent(doc, name: 'pubdate') ??
-        _metaContent(doc, name: 'publish-date') ??
-        _metaContent(doc, name: 'publication_date') ??
-        _metaContent(doc, name: 'date') ??
-        _metaContent(doc, name: 'datePublished') ??
-        _metaContent(doc, itemProp: 'datePublished') ??
-        _metaContent(doc, property: 'article:published_time');
-    final publishedAt = _parseDateTime(publishedRaw);
+    final publishedAt = _firstDate(meta, const [
+      ('pubdate', MetaKeyAttribute.name),
+      ('publish-date', MetaKeyAttribute.name),
+      ('publication_date', MetaKeyAttribute.name),
+      ('date', MetaKeyAttribute.name),
+      ('datePublished', MetaKeyAttribute.name),
+      ('datePublished', MetaKeyAttribute.itemProp),
+      ('article:published_time', MetaKeyAttribute.property),
+    ]);
     if (publishedAt != null) {
       context.addPublishedAt(
         publishedAt,
@@ -136,13 +162,13 @@ class StandardMetaExtractor implements HtmlMetadataExtractorStage {
       );
     }
 
-    final modifiedRaw =
-        _metaContent(doc, name: 'last-modified') ??
-        _metaContent(doc, name: 'modified') ??
-        _metaContent(doc, name: 'dateModified') ??
-        _metaContent(doc, itemProp: 'dateModified') ??
-        _metaContent(doc, property: 'article:modified_time');
-    final modifiedAt = _parseDateTime(modifiedRaw);
+    final modifiedAt = _firstDate(meta, const [
+      ('last-modified', MetaKeyAttribute.name),
+      ('modified', MetaKeyAttribute.name),
+      ('dateModified', MetaKeyAttribute.name),
+      ('dateModified', MetaKeyAttribute.itemProp),
+      ('article:modified_time', MetaKeyAttribute.property),
+    ]);
     if (modifiedAt != null) {
       context.addModifiedAt(
         modifiedAt,
@@ -153,37 +179,27 @@ class StandardMetaExtractor implements HtmlMetadataExtractorStage {
     }
   }
 
+  // Checks each key attribute in priority order (name, property, http-equiv,
+  // itemprop) and returns the first non-empty value for the first attribute
+  // that has one.
   static String? _metaContent(
-    dynamic doc, {
+    MetaTagIndex meta, {
     String? name,
     String? property,
     String? httpEquiv,
     String? itemProp,
   }) {
-    String? contentFromSelector(String selector) {
-      final el = doc.querySelector(selector);
-      if (el == null) return null;
-      final v = el.attributes['content'] ?? el.attributes['value'];
-      return _cleanText(v);
+    final lookups = <(String?, MetaKeyAttribute)>[
+      (name, MetaKeyAttribute.name),
+      (property, MetaKeyAttribute.property),
+      (httpEquiv, MetaKeyAttribute.httpEquiv),
+      (itemProp, MetaKeyAttribute.itemProp),
+    ];
+    for (final (key, attribute) in lookups) {
+      if (key == null) continue;
+      final value = meta.firstText([key], attributes: {attribute});
+      if (value != null) return value;
     }
-
-    if (name != null) {
-      final v = contentFromSelector('meta[name="$name"]');
-      if (v != null) return v;
-    }
-    if (property != null) {
-      final v = contentFromSelector('meta[property="$property"]');
-      if (v != null) return v;
-    }
-    if (httpEquiv != null) {
-      final v = contentFromSelector('meta[http-equiv="$httpEquiv"]');
-      if (v != null) return v;
-    }
-    if (itemProp != null) {
-      final v = contentFromSelector('meta[itemprop="$itemProp"]');
-      if (v != null) return v;
-    }
-
     return null;
   }
 
@@ -198,35 +214,24 @@ class StandardMetaExtractor implements HtmlMetadataExtractorStage {
     return trimmed.replaceAll(RegExp(r'\s+'), ' ');
   }
 
-  static DateTime? _parseDateTime(String? raw) {
-    final s = raw?.trim();
-    if (s == null || s.isEmpty) return null;
-
-    final digitsOnly = RegExp(r'^\d+$');
-    if (digitsOnly.hasMatch(s)) {
-      final n = int.tryParse(s);
-      if (n == null) {
-        return null;
-      }
-      if (s.length >= 13) {
-        return DateTime.fromMillisecondsSinceEpoch(n, isUtc: true);
-      }
-      if (s.length == 10) {
-        return DateTime.fromMillisecondsSinceEpoch(n * 1000, isUtc: true);
+  // Walks [lookups] in priority order and, within each, tags in document
+  // order, returning the first value that parses as a date. An unparseable
+  // placeholder such as `Monday` must not hide a later valid timestamp.
+  static DateTime? _firstDate(
+    MetaTagIndex meta,
+    List<(String, MetaKeyAttribute)> lookups,
+  ) {
+    for (final (key, attribute) in lookups) {
+      for (final raw in meta.texts([key], attributes: {attribute})) {
+        final parsed = DateUtils.parseString(raw);
+        if (parsed != null) return parsed;
       }
     }
-
-    final dt = DateTime.tryParse(s);
-    if (dt != null) {
-      return dt;
-    }
-
-    final withT = s.contains(' ') && !s.contains('T')
-        ? s.replaceFirst(' ', 'T')
-        : s;
-    return DateTime.tryParse(withT);
+    return null;
   }
 }
+
+const String _htmlNamespace = 'http://www.w3.org/1999/xhtml';
 
 const double _scoreTitle = 0.65;
 const double _scoreHeadingTitle = 0.35;

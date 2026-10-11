@@ -37,6 +37,10 @@ class RawLinkTag {
   /// The `title` attribute value, or `null` if not present.
   final String? title;
 
+  /// A JSON-compatible map of this tag's attributes.
+  ///
+  /// Absent optional attributes are written as `null`. [RawLinkTag.fromJson]
+  /// reads this format back.
   Map<String, dynamic> toJson() {
     return <String, dynamic>{
       'rel': rel,
@@ -47,6 +51,11 @@ class RawLinkTag {
     };
   }
 
+  /// Creates a [RawLinkTag] from a map produced by [toJson].
+  ///
+  /// Parsing is lenient and does not throw for missing or malformed values: a
+  /// missing `rel` or `href` becomes an empty string, and other missing
+  /// attributes become `null`.
   factory RawLinkTag.fromJson(Map<String, dynamic> json) {
     return RawLinkTag(
       rel: json.getString('rel', defaultValue: ''),
@@ -82,6 +91,16 @@ class RawMetadata {
   /// All `<link>` tags found in the document.
   final List<RawLinkTag> links;
 
+  /// Collects the raw `<meta>` and `<link>` tags of [document].
+  ///
+  /// Each `<meta>` tag is keyed by its first non-empty `name`, `property`, or
+  /// `http-equiv` attribute, trimmed and lowercased. Its trimmed `content` is
+  /// appended under that key in document order. Tags without a key or with
+  /// empty content are skipped.
+  ///
+  /// Each `<link>` tag with a non-empty `rel` and `href` becomes a
+  /// [RawLinkTag] with trimmed values. Empty `type`, `sizes`, and `title`
+  /// attributes become `null`. Relative `href` values are kept as written.
   static RawMetadata fromDocument(Document document) {
     final metaMap = <String, List<String>>{};
 
@@ -118,6 +137,10 @@ class RawMetadata {
     return RawMetadata(meta: metaMap, links: linkTags);
   }
 
+  /// A JSON-compatible map of this raw metadata.
+  ///
+  /// [meta] is written as a map of string lists, and [links] as a list of
+  /// [RawLinkTag.toJson] maps. [RawMetadata.fromJson] reads this format back.
   Map<String, dynamic> toJson() {
     return <String, dynamic>{
       'meta': <String, dynamic>{
@@ -127,21 +150,36 @@ class RawMetadata {
     };
   }
 
+  /// Creates a [RawMetadata] from a map produced by [toJson].
+  ///
+  /// Parsing is lenient and does not throw. A missing or malformed `meta`
+  /// value yields an empty map. Within each `meta` list, `null` entries are
+  /// skipped and other values are converted with `toString()`. Each `links`
+  /// entry that is not a string-keyed map is skipped, so one malformed tag
+  /// does not discard the others.
   factory RawMetadata.fromJson(Map<String, dynamic> json) {
     return RawMetadata(
       meta: Convert.toMap<String, List<String>>(
         json['meta'],
-        valueConverter: (v) => Convert.toList<String>(v, defaultValue: []),
+        valueConverter: _stringListFromJson,
         defaultValue: {},
       ),
-      links: Convert.toList<RawLinkTag>(
-        json['links'],
-        elementConverter: (e) =>
-            RawLinkTag.fromJson(Map<String, dynamic>.from(e as Map)),
-        defaultValue: [],
-      ),
+      links: <RawLinkTag>[
+        for (final element
+            in Convert.tryToList<dynamic>(json['links']) ?? const <dynamic>[])
+          if (Convert.tryToMap<String, dynamic>(element) case final link?)
+            RawLinkTag.fromJson(link),
+      ],
     );
   }
+}
+
+/// Converts each non-null element of [value] to a string, skipping `null`
+/// entries so one malformed value cannot discard the rest of its list.
+List<String> _stringListFromJson(Object? value) {
+  final list = Convert.tryToList<dynamic>(value);
+  if (list == null) return <String>[];
+  return list.map(Convert.tryToString).whereType<String>().toList();
 }
 
 String? _metaKey(Element el) {

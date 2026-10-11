@@ -98,7 +98,7 @@ void main() {
         'kind': 1,
         'createdAtMs': 0,
         'ttlMs': 0,
-        'payload': {},
+        'payload': <String, dynamic>{},
       }),
       throwsFormatException,
     );
@@ -107,7 +107,7 @@ void main() {
         'kind': 'x',
         'createdAtMs': 'bad',
         'ttlMs': 0,
-        'payload': {},
+        'payload': <String, dynamic>{},
       }),
       throwsFormatException,
     );
@@ -116,7 +116,7 @@ void main() {
         'kind': 'x',
         'createdAtMs': 0,
         'ttlMs': 'bad',
-        'payload': {},
+        'payload': <String, dynamic>{},
       }),
       throwsFormatException,
     );
@@ -125,7 +125,7 @@ void main() {
         'kind': 'x',
         'createdAtMs': 0,
         'ttlMs': 0,
-        'payload': [],
+        'payload': <Object?>[],
       }),
       throwsFormatException,
     );
@@ -134,7 +134,7 @@ void main() {
         'kind': 'unknown',
         'createdAtMs': 0,
         'ttlMs': 0,
-        'payload': {},
+        'payload': <String, dynamic>{},
       }),
       throwsFormatException,
     );

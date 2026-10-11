@@ -51,4 +51,33 @@ void main() {
     expect(result.length, 1);
     expect(result.first.toString(), 'https://example.com/base/a');
   });
+
+  group('EXT-R2-5 WHATWG input cleanup', () {
+    test('removes ASCII tabs and newlines anywhere', () {
+      expect(
+        resolver.resolve(base, 'https://exa\tmple.com/a\r\n/b'),
+        Uri.parse('https://example.com/a/b'),
+      );
+      expect(
+        resolver.resolve(base, 'img/\nx.png'),
+        Uri.parse('https://example.com/base/img/x.png'),
+      );
+    });
+
+    test('trims leading and trailing C0 controls and spaces', () {
+      expect(
+        resolver.resolve(base, '\u0000 https://example.com/a \u001f'),
+        Uri.parse('https://example.com/a'),
+      );
+    });
+
+    test('rejects a scheme split by a newline', () {
+      expect(resolver.resolve(base, 'java\nscript:alert(1)'), isNull);
+      expect(resolver.resolve(base, 'da\tta:text/plain,hi'), isNull);
+    });
+
+    test('keeps interior spaces', () {
+      expect(resolver.resolve(base, 'https://example.com/a b')?.path, '/a%20b');
+    });
+  });
 }

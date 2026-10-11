@@ -1,6 +1,6 @@
 import 'package:metalink/metalink.dart';
 
-void main() async {
+Future<void> main() async {
   print('🚀 MetaLink Example\n');
 
   // 1. Simple Extraction

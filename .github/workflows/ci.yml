@@ -17,6 +17,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Setup Dart (stable)
         uses: dart-lang/setup-dart@v1
         with:
@@ -25,6 +27,7 @@ jobs:
       - name: Validate release lane
         env:
           TARGET_LANE: ${{ github.event_name == 'pull_request' && github.base_ref || github.ref_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         shell: bash
         run: |
           set -euo pipefail
@@ -41,29 +44,51 @@ jobs:
             exit 1
           fi
 
+          # A pull request that changes the version will be tagged and published
+          # after merge, so reject versions that were already released.
+          if [[ -n "$BASE_SHA" ]]; then
+            git fetch --no-tags --depth=1 origin "$BASE_SHA"
+            base_version=$(git show FETCH_HEAD:pubspec.yaml | awk '/^version:/ {print $2; exit}' | tr -d "\"'")
+            if [[ "$version" != "$base_version" ]]; then
+              if git ls-remote --exit-code --tags origin "refs/tags/metalink-v$version" >/dev/null 2>&1; then
+                echo "Tag metalink-v$version already exists; choose a new version."
+                exit 1
+              fi
+              status=$(curl -s -o /dev/null -w '%{http_code}' "https://pub.dev/api/packages/metalink/versions/$version" || true)
+              if [[ "$status" == '200' ]]; then
+                echo "metalink $version is already published on pub.dev; choose a new version."
+                exit 1
+              elif [[ "$status" != '404' ]]; then
+                echo "::warning::Could not confirm that metalink $version is unpublished (pub.dev returned $status)."
+              fi
+            fi
+          fi
+
       - name: Install dependencies
         run: dart pub get
       - name: Check formatting
         run: dart format --output=none --set-exit-if-changed .
       - name: Analyze
-        run: dart analyze
+        run: dart analyze --fatal-infos
       - name: Test
         run: dart test
 
   test-minimum:
-    name: Test on Dart 3.11
+    name: Test on minimum Dart SDK
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v7
-      - name: Setup Dart 3.11
+        with:
+          persist-credentials: false
+      - name: Setup Dart 3.13.5
         uses: dart-lang/setup-dart@v1
         with:
-          sdk: 3.11.0
+          sdk: 3.13.5
       - name: Install dependencies
         run: dart pub get
       - name: Analyze
-        run: dart analyze
+        run: dart analyze --fatal-infos
       - name: Test
         run: dart test
 
@@ -74,6 +99,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Setup Dart (beta)
         uses: dart-lang/setup-dart@v1
         with:
@@ -91,6 +118,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Setup Dart (stable)
         uses: dart-lang/setup-dart@v1
         with:
@@ -108,6 +137,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Setup Flutter (stable)
         uses: subosito/flutter-action@v2
         with:

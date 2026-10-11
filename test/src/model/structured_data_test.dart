@@ -18,7 +18,7 @@ void main() {
     final decoded = StructuredDataGraph.fromJson({
       'nodes': [
         {'@type': 'Article'},
-        {},
+        <String, dynamic>{},
         'bad',
       ],
     });

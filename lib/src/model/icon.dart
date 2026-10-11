@@ -1,4 +1,5 @@
 import 'package:convert_object/convert_object.dart';
+import 'package:metalink/src/model/json_uri.dart';
 
 /// Represents a favicon or icon candidate extracted from the page.
 ///
@@ -33,6 +34,10 @@ class IconCandidate {
   /// The link `rel` value (e.g., `icon`, `apple-touch-icon`).
   final String? rel;
 
+  /// A JSON-compatible map of this icon candidate.
+  ///
+  /// [url] is written as a string, and absent optional values as `null`.
+  /// [IconCandidate.fromJson] reads this format back.
   Map<String, dynamic> toJson() {
     return <String, dynamic>{
       'url': url.toString(),
@@ -42,9 +47,14 @@ class IconCandidate {
     };
   }
 
+  /// Creates an [IconCandidate] from a map produced by [toJson].
+  ///
+  /// Throws a `ConversionException` from `package:convert_object` when `url`
+  /// is missing or is not a valid URI. Optional values that cannot be
+  /// converted become `null`.
   factory IconCandidate.fromJson(Map<String, dynamic> json) {
     return IconCandidate(
-      url: json.getUri('url'),
+      url: readJsonUri(json, 'url'),
       sizes: json.tryGetString('sizes'),
       type: json.tryGetString('type'),
       rel: json.tryGetString('rel'),

@@ -67,6 +67,52 @@ void main() {
     );
   });
 
+  test('EXT-R2-5 removes newlines from a base href', () async {
+    const html =
+        '<base href="https://cdn.example.com/\nassets/">'
+        '<meta property="og:image" content="a.png">';
+    final pipeline = ExtractPipeline(stages: const [OpenGraphExtractor()]);
+    final output = await pipeline.runLocal(
+      page: pageFromHtml(html),
+      extractOptions: const ExtractOptions(),
+    );
+
+    expect(
+      output.metadata.images.single.url.toString(),
+      'https://cdn.example.com/assets/a.png',
+    );
+  });
+
+  group('hostless base href', () {
+    for (final href in <String>[
+      'https:',
+      'https:/assets/',
+      'https:///',
+      'http://',
+    ]) {
+      test('"$href" is ignored in favor of the document URL', () async {
+        final html =
+            '<base href="$href">'
+            '<meta property="og:image" content="images/relative.png">'
+            '<link rel="icon" href="/favicon.ico">';
+        final pipeline = ExtractPipeline(
+          stages: const [OpenGraphExtractor(), LinkRelExtractor()],
+        );
+        final output = await pipeline.runLocal(
+          page: pageFromHtml(html),
+          extractOptions: const ExtractOptions(),
+        );
+
+        expect(output.metadata.images.map((image) => image.url.toString()), [
+          'https://example.com/images/relative.png',
+        ]);
+        expect(output.metadata.icons.map((icon) => icon.url.toString()), [
+          'https://example.com/favicon.ico',
+        ]);
+      });
+    }
+  });
+
   test('resolves base href for relative images', () async {
     final html = readFixture('html/base_href.html');
     final pipeline = ExtractPipeline(stages: const [OpenGraphExtractor()]);

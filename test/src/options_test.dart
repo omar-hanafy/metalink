@@ -1,6 +1,6 @@
-import 'package:metalink/src/options.dart';
 import 'package:metalink/src/cache/cache_store.dart';
 import 'package:metalink/src/network/request_policy.dart';
+import 'package:metalink/src/options.dart';
 import 'package:test/test.dart';
 
 void main() {

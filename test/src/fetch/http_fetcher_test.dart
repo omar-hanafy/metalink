@@ -142,28 +142,67 @@ void main() {
     expect(response.url, finalUrl);
   });
 
-  test('uninspectable transport does not follow when disabled', () async {
-    final start = Uri.parse('https://start.test/');
-    final client = RecordingHttpClient(
-      handler: (request) async {
-        expect(request.followRedirects, isFalse);
-        expect(request.maxRedirects, 0);
-        return _ResponseWithUrl(302, url: start);
-      },
-    );
-    final fetcher = HttpFetcher(
-      client: client,
-      capabilities: const FetcherCapabilities(
-        supportsAbort: true,
-        redirectHandling: RedirectHandlingCapability.unavailable,
-      ),
-    );
+  // HttpFetcher converts every exception from send() into
+  // FetchResponse.error, so these tests assert on the recorded request after
+  // get() returns instead of inside the client handler.
+  for (final (label, options) in <(String, FetchOptions)>[
+    ('disabled', const FetchOptions(followRedirects: false)),
+    ('the redirect budget is zero', const FetchOptions(maxRedirects: 0)),
+  ]) {
+    test('uninspectable transport does not follow when $label', () async {
+      final start = Uri.parse('https://start.test/');
+      final client = RecordingHttpClient(
+        handler: (request) async => _ResponseWithUrl(302, url: start),
+      );
+      final fetcher = HttpFetcher(
+        client: client,
+        capabilities: const FetcherCapabilities(
+          supportsAbort: true,
+          redirectHandling: RedirectHandlingCapability.unavailable,
+        ),
+      );
 
-    await fetcher.get(
-      start,
-      options: const FetchOptions(followRedirects: false),
-    );
-  });
+      final response = await fetcher.get(start, options: options);
+
+      expect(response.error, isNull);
+      expect(response.statusCode, 302);
+      final request = client.requests.single;
+      expect(request.followRedirects, isFalse);
+      expect(request.maxRedirects, 0);
+    });
+  }
+
+  // The largest int cannot be incremented to detect truncation, so it must
+  // behave as "no limit" instead of overflowing.
+  const maxInt = 0x7fffffffffffffff;
+  for (final (label, options, perCall) in <(String, FetchOptions, int?)>[
+    ('FetchOptions.maxBytes', const FetchOptions(maxBytes: maxInt), null),
+    ('a per-call maxBytes', const FetchOptions(), maxInt),
+  ]) {
+    test('$label at the integer maximum reads the whole body', () async {
+      final body = List<int>.generate(70000, (index) => index % 251);
+      final client = RecordingHttpClient(
+        handler: (request) async => http.StreamedResponse(
+          Stream<List<int>>.fromIterable(<List<int>>[
+            body.sublist(0, 30000),
+            body.sublist(30000),
+          ]),
+          200,
+        ),
+      );
+      final fetcher = HttpFetcher(client: client);
+
+      final response = await fetcher.get(
+        Uri.parse('https://example.com/large'),
+        options: options,
+        maxBytes: perCall,
+      );
+
+      expect(response.error, isNull);
+      expect(response.truncated, isFalse);
+      expect(response.bodyBytes, body);
+    });
+  }
 
   test('HttpFetcher actively aborts an in-flight request on timeout', () async {
     final abortObserved = Completer<void>();

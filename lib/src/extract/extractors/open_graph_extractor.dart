@@ -1,24 +1,44 @@
+import 'package:metalink/src/extract/pipeline.dart';
 import 'package:metalink/src/model/diagnostics.dart';
 import 'package:metalink/src/model/link_metadata.dart';
 import 'package:metalink/src/model/media.dart';
-import 'package:metalink/src/util/html_utils.dart';
-import 'package:metalink/src/extract/pipeline.dart';
+import 'package:metalink/src/util/date_utils.dart';
 
+/// An extractor stage that reads Open Graph (`og:*`) and related article
+/// meta tags.
+///
+/// Keys are read from either the `property` or the `name` attribute and match
+/// ASCII case-insensitively. For single-valued fields the first non-empty tag
+/// in document order wins, and `og:url` uses the first value that resolves to
+/// an absolute HTTP(S) URL.
+///
+/// `og:image`, `og:video`, and `og:audio` are structured: each root tag (or
+/// its `:url` alias) starts a new item, and the `:secure_url`, `:type`,
+/// `:width`, `:height`, and (for images) `:alt` tags that follow describe that
+/// item until the next root. A `:secure_url` replaces the root URL while
+/// keeping the collected properties. A root whose value is empty or cannot be
+/// resolved, such as a `data:` URL, is dropped together with the properties
+/// that follow it. A usable `:secure_url` after such a root names the same
+/// resource, so it starts the item, and the properties after it describe that
+/// item. Dimensions that are not positive integers are ignored.
+///
+/// Also emits `og:type` as a [LinkKind], `article:published_time` (or
+/// `og:published_time`) and `article:modified_time` (or `og:updated_time`) as
+/// dates, and `article:tag`, `book:tag`, and `video:tag` as keywords. Each
+/// date uses the first value in document order that parses as a timestamp.
+/// Does nothing when `ExtractOptions.extractOpenGraph` is `false`.
 class OpenGraphExtractor implements HtmlMetadataExtractorStage {
+  /// Creates the stateless Open Graph extractor stage.
   const OpenGraphExtractor();
 
   @override
   void extract(HtmlExtractContext context) {
     if (!context.extractOptions.extractOpenGraph) return;
 
-    final doc = context.document;
+    final meta = context.metaTags;
 
-    final title = HtmlUtils.metaContent(
-      doc,
-      'meta[property="og:title"], meta[name="og:title"]',
-    );
     _addString(
-      title,
+      meta.firstText(const ['og:title']),
       (v) => context.addTitle(
         v,
         source: CandidateSource.openGraph,
@@ -27,12 +47,8 @@ class OpenGraphExtractor implements HtmlMetadataExtractorStage {
       ),
     );
 
-    final description = HtmlUtils.metaContent(
-      doc,
-      'meta[property="og:description"], meta[name="og:description"]',
-    );
     _addString(
-      description,
+      meta.firstText(const ['og:description']),
       (v) => context.addDescription(
         v,
         source: CandidateSource.openGraph,
@@ -41,12 +57,8 @@ class OpenGraphExtractor implements HtmlMetadataExtractorStage {
       ),
     );
 
-    final siteName = HtmlUtils.metaContent(
-      doc,
-      'meta[property="og:site_name"], meta[name="og:site_name"]',
-    );
     _addString(
-      siteName,
+      meta.firstText(const ['og:site_name']),
       (v) => context.addSiteName(
         v,
         source: CandidateSource.openGraph,
@@ -55,12 +67,8 @@ class OpenGraphExtractor implements HtmlMetadataExtractorStage {
       ),
     );
 
-    final locale = HtmlUtils.metaContent(
-      doc,
-      'meta[property="og:locale"], meta[name="og:locale"]',
-    );
     _addString(
-      locale,
+      meta.firstText(const ['og:locale']),
       (v) => context.addLocale(
         v,
         source: CandidateSource.openGraph,
@@ -69,11 +77,15 @@ class OpenGraphExtractor implements HtmlMetadataExtractorStage {
       ),
     );
 
-    final ogUrlRaw = HtmlUtils.metaContent(
-      doc,
-      'meta[property="og:url"], meta[name="og:url"]',
-    );
-    final ogUrl = context.urlResolver.resolve(context.baseUrl, ogUrlRaw);
+    // Skip unusable og:url duplicates so a later valid value still counts.
+    // Read the raw value: collapsing whitespace would turn a wrapped line into
+    // an encoded space instead of letting the resolver remove the newline.
+    final ogUrl = context.urlResolver
+        .resolveAll(
+          context.baseUrl,
+          meta.find(const ['og:url']).map((tag) => tag.content),
+        )
+        .firstOrNull;
     if (ogUrl != null) {
       context.addCanonicalUrl(
         ogUrl,
@@ -83,10 +95,7 @@ class OpenGraphExtractor implements HtmlMetadataExtractorStage {
       );
     }
 
-    final ogType = HtmlUtils.metaContent(
-      doc,
-      'meta[property="og:type"], meta[name="og:type"]',
-    );
+    final ogType = meta.firstText(const ['og:type']);
     final kind = _mapOgTypeToKind(ogType, context.documentUrl);
     if (kind != null) {
       context.setKind(
@@ -97,116 +106,67 @@ class OpenGraphExtractor implements HtmlMetadataExtractorStage {
       );
     }
 
-    // Group og:image variants so width, height, and type stay attached to the right image URL.
-    final allMeta = doc.getElementsByTagName('meta');
-    ImageCandidate? currentImage;
-
-    void commitImage() {
-      if (currentImage != null) {
-        context.addImageCandidate(
-          currentImage!,
-          source: CandidateSource.openGraph,
-          score: _scoreImage,
-          evidence: 'og:image',
-        );
-        currentImage = null;
-      }
-    }
-
-    for (final el in allMeta) {
-      final propRaw = el.attributes['property'] ?? el.attributes['name'];
-      if (propRaw == null) continue;
-      final prop = propRaw.trim().toLowerCase();
-      if (!prop.startsWith('og:image')) continue;
-
-      final content = el.attributes['content'] ?? el.attributes['value'];
-      final value = content?.trim();
-      if (value == null || value.isEmpty) continue;
-
-      if (prop == 'og:image' || prop == 'og:image:url') {
-        final uri = context.urlResolver.resolve(context.baseUrl, value);
-        if (uri == null) continue;
-
-        commitImage();
-        currentImage = ImageCandidate(url: uri);
-      } else if (prop == 'og:image:secure_url') {
-        final uri = context.urlResolver.resolve(context.baseUrl, value);
-        if (uri == null) continue;
-
-        // secure_url is a structured property of the preceding image, not a
-        // second root image. Prefer it while retaining dimensions and alt text.
-        currentImage = currentImage == null
-            ? ImageCandidate(url: uri)
-            : _copyImage(currentImage!, url: uri);
-      } else if (currentImage != null) {
-        if (prop == 'og:image:width') {
-          final w = int.tryParse(value);
-          if (w != null) {
-            currentImage = _copyImage(currentImage!, width: w);
-          }
-        } else if (prop == 'og:image:height') {
-          final h = int.tryParse(value);
-          if (h != null) {
-            currentImage = _copyImage(currentImage!, height: h);
-          }
-        } else if (prop == 'og:image:type') {
-          currentImage = _copyImage(currentImage!, mimeType: value);
-        } else if (prop == 'og:image:alt') {
-          currentImage = _copyImage(currentImage!, alt: value);
-        }
-      }
-    }
-    commitImage();
-
-    // Collect og:video candidates and dedupe by URL to keep the list stable.
-    final videoRaws = HtmlUtils.metaContents(
-      doc,
-      'meta[property="og:video"], meta[name="og:video"], '
-      'meta[property="og:video:url"], meta[name="og:video:url"], '
-      'meta[property="og:video:secure_url"], meta[name="og:video:secure_url"]',
+    _collectStructured<ImageCandidate>(
+      context,
+      root: 'og:image',
+      create: (url) => ImageCandidate(url: url),
+      withUrl: (image, url) => _copyImage(image, url: url),
+      apply: (image, property, value) => switch (property) {
+        'width' => _copyImage(image, width: _parseDimension(value)),
+        'height' => _copyImage(image, height: _parseDimension(value)),
+        'type' => _copyImage(image, mimeType: value),
+        'alt' => _copyImage(image, alt: value),
+        _ => image,
+      },
+      emit: (image) => context.addImageCandidate(
+        image,
+        source: CandidateSource.openGraph,
+        score: _scoreImage,
+        evidence: 'og:image',
+      ),
     );
-    final seenVideos = <String>{};
-    for (final raw in videoRaws) {
-      final uri = context.urlResolver.resolve(context.baseUrl, raw);
-      if (uri == null) continue;
-      if (!seenVideos.add(uri.toString())) continue;
 
-      context.addVideoUri(
-        uri,
+    _collectStructured<VideoCandidate>(
+      context,
+      root: 'og:video',
+      create: (url) => VideoCandidate(url: url),
+      withUrl: (video, url) => _copyVideo(video, url: url),
+      apply: (video, property, value) => switch (property) {
+        'width' => _copyVideo(video, width: _parseDimension(value)),
+        'height' => _copyVideo(video, height: _parseDimension(value)),
+        'type' => _copyVideo(video, mimeType: value),
+        _ => video,
+      },
+      emit: (video) => context.addVideoCandidate(
+        video,
         source: CandidateSource.openGraph,
         score: _scoreVideo,
         evidence: 'og:video',
-      );
-    }
-
-    // Collect og:audio candidates and dedupe by URL to avoid repeat entries.
-    final audioRaws = HtmlUtils.metaContents(
-      doc,
-      'meta[property="og:audio"], meta[name="og:audio"], '
-      'meta[property="og:audio:url"], meta[name="og:audio:url"], '
-      'meta[property="og:audio:secure_url"], meta[name="og:audio:secure_url"]',
+      ),
     );
-    final seenAudios = <String>{};
-    for (final raw in audioRaws) {
-      final uri = context.urlResolver.resolve(context.baseUrl, raw);
-      if (uri == null) continue;
-      if (!seenAudios.add(uri.toString())) continue;
 
-      context.addAudioUri(
-        uri,
+    _collectStructured<AudioCandidate>(
+      context,
+      root: 'og:audio',
+      create: (url) => AudioCandidate(url: url),
+      withUrl: (audio, url) =>
+          AudioCandidate(url: url, mimeType: audio.mimeType),
+      apply: (audio, property, value) => switch (property) {
+        'type' => AudioCandidate(url: audio.url, mimeType: value),
+        _ => audio,
+      },
+      emit: (audio) => context.addAudioCandidate(
+        audio,
         source: CandidateSource.openGraph,
         score: _scoreAudio,
         evidence: 'og:audio',
-      );
-    }
+      ),
+    );
 
     // Capture article timestamps; many sites publish these in the Open Graph namespace.
-    final publishedRaw = HtmlUtils.metaContent(
-      doc,
-      'meta[property="article:published_time"], meta[name="article:published_time"], '
-      'meta[property="og:published_time"], meta[name="og:published_time"]',
+    final publishedAt = _firstDate(
+      meta.texts(const ['article:published_time', 'og:published_time']),
     );
-    final publishedAt = _parseDateTime(publishedRaw);
     if (publishedAt != null) {
       context.addPublishedAt(
         publishedAt,
@@ -216,12 +176,9 @@ class OpenGraphExtractor implements HtmlMetadataExtractorStage {
       );
     }
 
-    final modifiedRaw = HtmlUtils.metaContent(
-      doc,
-      'meta[property="article:modified_time"], meta[name="article:modified_time"], '
-      'meta[property="og:updated_time"], meta[name="og:updated_time"]',
+    final modifiedAt = _firstDate(
+      meta.texts(const ['article:modified_time', 'og:updated_time']),
     );
-    final modifiedAt = _parseDateTime(modifiedRaw);
     if (modifiedAt != null) {
       context.addModifiedAt(
         modifiedAt,
@@ -232,12 +189,7 @@ class OpenGraphExtractor implements HtmlMetadataExtractorStage {
     }
 
     // Map Open Graph tags to keywords to support search and filtering use cases.
-    final tags = HtmlUtils.metaContents(
-      doc,
-      'meta[property="article:tag"], meta[name="article:tag"], '
-      'meta[property="book:tag"], meta[name="book:tag"], '
-      'meta[property="video:tag"], meta[name="video:tag"]',
-    );
+    final tags = meta.texts(const ['article:tag', 'book:tag', 'video:tag']);
     for (final tag in tags) {
       context.addKeyword(
         tag,
@@ -246,6 +198,68 @@ class OpenGraphExtractor implements HtmlMetadataExtractorStage {
         evidence: 'og:tag',
       );
     }
+  }
+
+  /// Groups a structured Open Graph property family such as `og:image` into
+  /// items and passes each completed item to [emit] in document order.
+  ///
+  /// A `root` or `root:url` tag commits the current item and starts a new one.
+  /// When that root is empty or unresolvable the current item becomes `null`,
+  /// so the rejected root's structured properties are dropped instead of
+  /// overwriting the previous item. A `root:secure_url` replaces the current
+  /// item's URL, or starts an item when there is none, because it names the
+  /// same resource as its root.
+  static void _collectStructured<T>(
+    HtmlExtractContext context, {
+    required String root,
+    required T Function(Uri url) create,
+    required T Function(T item, Uri url) withUrl,
+    required T Function(T item, String property, String value) apply,
+    required void Function(T item) emit,
+  }) {
+    final rootUrl = '$root:url';
+    final prefix = '$root:';
+    T? current;
+
+    void commit() {
+      final item = current;
+      if (item != null) emit(item);
+      current = null;
+    }
+
+    for (final tag in context.metaTags.tags) {
+      final key = tag.property ?? tag.name;
+      if (key == null) continue;
+
+      if (key == root || key == rootUrl) {
+        commit();
+        final uri = context.urlResolver.resolve(context.baseUrl, tag.content);
+        if (uri != null) current = create(uri);
+        continue;
+      }
+
+      if (!key.startsWith(prefix)) continue;
+      final value = tag.content;
+      if (value == null) continue;
+      final property = key.substring(prefix.length);
+      final item = current;
+
+      if (property == 'secure_url') {
+        final uri = context.urlResolver.resolve(context.baseUrl, value);
+        if (uri == null) continue;
+        current = item == null ? create(uri) : withUrl(item, uri);
+      } else if (item != null) {
+        current = apply(item, property, value);
+      }
+    }
+    commit();
+  }
+
+  /// A positive pixel dimension parsed from [value], or `null` when [value]
+  /// is not an integer greater than zero.
+  static int? _parseDimension(String value) {
+    final parsed = int.tryParse(value);
+    return parsed != null && parsed > 0 ? parsed : null;
   }
 
   static void _addString(String? value, void Function(String v) emit) {
@@ -269,6 +283,21 @@ class OpenGraphExtractor implements HtmlMetadataExtractorStage {
       mimeType: mimeType ?? input.mimeType,
       alt: alt ?? input.alt,
       byteSize: input.byteSize,
+    );
+  }
+
+  static VideoCandidate _copyVideo(
+    VideoCandidate input, {
+    Uri? url,
+    int? width,
+    int? height,
+    String? mimeType,
+  }) {
+    return VideoCandidate(
+      url: url ?? input.url,
+      width: width ?? input.width,
+      height: height ?? input.height,
+      mimeType: mimeType ?? input.mimeType,
     );
   }
 
@@ -296,33 +325,14 @@ class OpenGraphExtractor implements HtmlMetadataExtractorStage {
     }
   }
 
-  static DateTime? _parseDateTime(String? raw) {
-    final s = raw?.trim();
-    if (s == null || s.isEmpty) return null;
-
-    // Handle numeric timestamps (seconds or millis) before generic parsing.
-    final digitsOnly = RegExp(r'^\d+$');
-    if (digitsOnly.hasMatch(s)) {
-      final n = int.tryParse(s);
-      if (n == null) return null;
-
-      if (s.length >= 13) {
-        return DateTime.fromMillisecondsSinceEpoch(n, isUtc: true);
-      }
-      if (s.length == 10) {
-        return DateTime.fromMillisecondsSinceEpoch(n * 1000, isUtc: true);
-      }
+  // The first value in document order that parses as a date. An unparseable
+  // placeholder such as `TBD` must not hide a later valid timestamp.
+  static DateTime? _firstDate(Iterable<String> raws) {
+    for (final raw in raws) {
+      final parsed = DateUtils.parseString(raw);
+      if (parsed != null) return parsed;
     }
-
-    // Accept ISO8601 style strings supported by DateTime.parse.
-    final dt = DateTime.tryParse(s);
-    if (dt != null) return dt;
-
-    // Normalize "YYYY-MM-DD HH:MM:SS" to ISO8601 by adding a T separator.
-    final withT = s.contains(' ') && !s.contains('T')
-        ? s.replaceFirst(' ', 'T')
-        : s;
-    return DateTime.tryParse(withT);
+    return null;
   }
 }
 

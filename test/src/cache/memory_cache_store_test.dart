@@ -118,12 +118,37 @@ void main() {
 
   test('purgeExpired removes expired entries', () async {
     final store = MemoryCacheStore();
-    final now = DateTime.now().millisecondsSinceEpoch;
-    await store.write('k1', entry(createdAtMs: now - 1000, ttlMs: 1));
-    await store.write('k2', entry(createdAtMs: now, ttlMs: 1000));
+    const shortTtl = Duration(milliseconds: 500);
+    // Write accepts only unexpired entries, so store a short-lived entry while
+    // it is still valid and let it expire in place. Its creation time is read
+    // in the same synchronous step as the write, and the TTL leaves ample
+    // room for that step even under load.
+    await store.write(
+      'k1',
+      entry(
+        createdAtMs: DateTime.now().millisecondsSinceEpoch,
+        ttlMs: shortTtl.inMilliseconds,
+      ),
+    );
+    await store.write(
+      'k2',
+      entry(
+        createdAtMs: DateTime.now().millisecondsSinceEpoch,
+        ttlMs: const Duration(hours: 1).inMilliseconds,
+      ),
+    );
+    // Confirms the short-lived entry was stored, not skipped as expired.
+    expect((await store.read('k1')).entry, isNotNull);
+    await Future<void>.delayed(shortTtl * 2);
+
     final purge = await store.purgeExpired();
     expect(purge.ok, isTrue);
-    expect(purge.purged, 0);
+    expect(purge.purged, 1);
+
+    // A second pass finds nothing, so the first pass removed the entry
+    // instead of leaving it for a lazy read to discard.
+    final secondPurge = await store.purgeExpired();
+    expect(secondPurge.purged, 0);
     expect((await store.read('k1')).entry, isNull);
     expect((await store.read('k2')).entry, isNotNull);
   });

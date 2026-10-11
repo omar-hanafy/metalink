@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:metalink/src/extract/url_resolver.dart';
 import 'package:metalink/src/fetch/fetcher.dart';
 import 'package:metalink/src/model/url_optimization.dart';
+import 'package:metalink/src/network/deadline_timer.dart';
 import 'package:metalink/src/network/request_context.dart';
 import 'package:metalink/src/network/request_policy.dart';
 import 'package:metalink/src/options.dart';
@@ -25,20 +26,61 @@ enum RequestMethodStrategy {
 
 /// Stable categories for failures enforced by [RequestEngine].
 enum RequestFailureCode {
+  /// The initial target is not an absolute HTTP(S) URL with a host.
   invalidTarget,
+
+  /// The request policy rejected an initial, redirect, or proxy target.
+  ///
+  /// A validator that throws also fails closed with this code, and the thrown
+  /// error is kept in [RequestFailure.cause].
   policyRejected,
+
+  /// [FetchOptions.proxyUrl] could not be applied to the target.
   proxyConfiguration,
+
+  /// A redirect arrived after [FetchOptions.maxRedirects] hops were used.
+  ///
+  /// With a `maxRedirects` of `0`, the first redirect fails with this code.
+  /// A browser transport cannot expose redirects, so on the web a redirect
+  /// with redirects disabled is reported as [transport] instead.
   redirectLimit,
+
+  /// A redirect led back to a URL already requested by this operation.
   redirectLoop,
+
+  /// A redirect `Location` is not a valid HTTP(S) URL, or an opaque transport
+  /// reported an invalid final URL.
   invalidRedirect,
+
+  /// The complete-operation deadline elapsed, or one attempt exceeded
+  /// [FetchOptions.timeout].
   timeout,
+
+  /// The caller cancelled through [RequestContext.cancellationSignal], or the
+  /// transport reported a [FetchCancellationException].
   cancelled,
+
+  /// The [Fetcher] reported any other error.
   transport,
+
+  /// The policy requires inspectable redirects, but the [Fetcher] cannot
+  /// guarantee them.
+  ///
+  /// See [RequestPolicy.requireInspectableRedirects]. A fetcher whose declared
+  /// capabilities rule out inspection fails before any request is sent. A
+  /// fetcher assumed or declared to be inspectable fails after a response
+  /// reports a URL other than the one requested, which shows that it followed
+  /// a redirect without per-hop validation; that response is discarded.
   unsupportedCapability,
 }
 
 /// A typed failure from the unified network boundary.
+///
+/// [RequestEngine.execute] returns this in [RequestEngineResult.failure]
+/// instead of throwing it. Branch on [code], which is stable, rather than on
+/// [message].
 class RequestFailure implements Exception {
+  /// Creates a failure of category [code] for [uri].
   const RequestFailure({
     required this.code,
     required this.message,
@@ -47,10 +89,26 @@ class RequestFailure implements Exception {
     this.stackTrace,
   });
 
+  /// The stable category of this failure.
   final RequestFailureCode code;
+
+  /// A human-readable description of the failure.
+  ///
+  /// For a policy rejection, this is the validator's reason when it gave one.
   final String message;
+
+  /// The URL the failure applies to.
+  ///
+  /// This is usually the logical target being requested, including a rejected
+  /// redirect target. Proxy-stage policy failures report the proxy endpoint,
+  /// a redirect loop reports the repeated URL, and an opaque transport's
+  /// invalid final URL is reported as returned.
   final Uri uri;
+
+  /// The underlying error, such as a transport or validator exception.
   final Object? cause;
+
+  /// The stack trace for [cause], if available.
   final StackTrace? stackTrace;
 
   @override
@@ -59,6 +117,7 @@ class RequestFailure implements Exception {
 
 /// Complete outcome of one logical request and all of its redirect hops.
 class RequestEngineResult {
+  /// Creates an outcome; [RequestEngine.execute] normally builds these.
   const RequestEngineResult({
     required this.originalUrl,
     required this.finalUrl,
@@ -69,7 +128,26 @@ class RequestEngineResult {
     this.failure,
   });
 
+  /// The URL passed to [RequestEngine.execute], before normalization.
   final Uri originalUrl;
+
+  /// The logical URL of the last target reached or attempted.
+  ///
+  /// This is normally the last URL requested. A redirect target that passed
+  /// the redirect checks becomes [finalUrl] before it is requested, so when
+  /// the request policy rejects that target, or the deadline or cancellation
+  /// ends the operation before it is sent, [finalUrl] is that target.
+  ///
+  /// A redirect that fails those checks leaves [finalUrl] at the URL that
+  /// returned the redirect. This covers [RequestFailureCode.redirectLimit],
+  /// [RequestFailureCode.redirectLoop], and
+  /// [RequestFailureCode.invalidRedirect]; [RequestFailure.uri] names the
+  /// offending URL.
+  ///
+  /// When an opaque transport follows redirects itself, this is the final URL
+  /// the transport reported, unless that URL is invalid. A
+  /// [RequestFailureCode.invalidTarget] failure keeps the URL passed in. It
+  /// never contains a [FetchOptions.proxyUrl] rewrite.
   final Uri finalUrl;
 
   /// Redirect hops observed and validated by MetaLink.
@@ -78,11 +156,34 @@ class RequestEngineResult {
   /// opaquely in compatibility mode, even if [finalUrl] differs from
   /// [originalUrl]. Inspect [capabilities] before relying on hop details.
   final List<RedirectHop> redirects;
+
+  /// Total time spent on the operation, including policy checks and all hops.
   final Duration duration;
+
+  /// Capabilities of the fetcher that served the request.
+  ///
+  /// A fetcher that does not implement [CapabilityAwareFetcher] reports
+  /// [FetcherCapabilities.legacy].
   final FetcherCapabilities capabilities;
+
+  /// The last response received, or `null` when the request ended before its
+  /// first hop or the response was discarded by a
+  /// [RequestFailureCode.unsupportedCapability] failure.
+  ///
+  /// Its [FetchResponse.url] is the logical URL rather than a proxy URL. It is
+  /// a redirect response when redirects are disabled or a redirect failed, and
+  /// it carries the transport error when the transport failed.
   final FetchResponse? response;
+
+  /// Why the request failed, or `null` when it completed.
+  ///
+  /// A completed request can still have a non-2xx [response] status.
   final RequestFailure? failure;
 
+  /// Whether the request completed without a [failure] or transport error.
+  ///
+  /// This does not inspect the HTTP status; use [FetchResponse.isOk] on
+  /// [response] for that.
   bool get isSuccess => failure == null && response?.error == null;
 
   /// Adapts this richer outcome to the legacy low-level response contract.
@@ -103,13 +204,52 @@ class RequestEngineResult {
 
 /// Central request, redirect, policy, proxy, header, and deadline engine.
 class RequestEngine {
-  RequestEngine({required Fetcher fetcher}) : _fetcher = fetcher;
+  /// Creates an engine that sends every hop through `fetcher`.
+  ///
+  /// The engine never closes `fetcher`; its owner remains responsible for it.
+  RequestEngine({required this._fetcher});
 
   final Fetcher _fetcher;
   static const UrlResolver _urlResolver = UrlResolver();
   static const String _defaultUserAgent =
       'MetaLink (+https://github.com/omar-hanafy/metalink)';
 
+  /// Performs one logical request to [startUrl] and returns its outcome.
+  ///
+  /// Network, policy, and lifetime failures are reported in
+  /// [RequestEngineResult.failure] instead of being thrown. Before every hop,
+  /// the target is validated by [FetchOptions.requestPolicy], and so is the
+  /// rewritten endpoint when [FetchOptions.proxyUrl] applies. Redirects are
+  /// followed only while [FetchOptions.followRedirects] allows it, up to
+  /// [FetchOptions.maxRedirects] hops, and sensitive headers and URL userinfo
+  /// credentials are removed at the trust boundaries the policy defines.
+  ///
+  /// The operation stops at [FetchOptions.totalTimeout] or at the deadline of
+  /// [context], whichever is earlier, and when the context's
+  /// [RequestContext.cancellationSignal] completes. Each attempt is also
+  /// limited by [FetchOptions.timeout].
+  ///
+  /// [purpose] is passed to the policy. For [RequestPurpose.oEmbed],
+  /// [RequestPurpose.manifest], and [RequestPurpose.enrichment], sensitive
+  /// headers are dropped unless
+  /// [RequestPolicy.forwardSensitiveHeadersToEnrichments] is `true`, and URL
+  /// userinfo is always dropped.
+  ///
+  /// [strategy] selects the HTTP methods. With
+  /// [RequestMethodStrategy.headWithGetFallback] or
+  /// [RequestMethodStrategy.headThenGet], a failed HEAD falls back to GET
+  /// unless the operation deadline elapsed or the caller cancelled. A HEAD
+  /// that exceeds only its own [FetchOptions.timeout] still falls back while
+  /// operation budget remains.
+  ///
+  /// [headers] are merged case-insensitively over [FetchOptions.headers] and
+  /// the user agent, and win on conflicts. [maxBytes] caps each GET body and
+  /// defaults to [FetchOptions.maxBytes] when `null`.
+  ///
+  /// For [RequestMethodStrategy.headThenGet], [shouldFetchBodyAfterHead]
+  /// receives a HEAD response that is neither an error nor a redirect and
+  /// decides whether to send the GET. When it returns `false`, the HEAD
+  /// response is the result. When it is `null`, the GET is always sent.
   Future<RequestEngineResult> execute(
     Uri startUrl, {
     required FetchOptions options,
@@ -156,7 +296,13 @@ class RequestEngine {
         ),
       );
     }
-    current = normalizedInitial;
+    // URL userinfo is a credential: dart:io, for one, sends it as
+    // `Authorization: Basic`. Enrichment URLs inherit it from the document URL
+    // through relative resolution, so it never travels with them.
+    final stripUserInfo = _isEnrichment(purpose);
+    current = stripUserInfo
+        ? _withoutUserInfo(normalizedInitial)
+        : normalizedInitial;
 
     final capabilityFailure = _capabilityFailure(capabilities, policy, current);
     if (capabilityFailure != null) {
@@ -221,7 +367,11 @@ class RequestEngine {
       Uri requestUrl;
       var hopHeaders = requestHeaders;
       try {
-        requestUrl = _applyProxy(current, options.proxyUrl);
+        requestUrl = _applyProxy(
+          current,
+          options.proxyUrl,
+          includeUserInfo: policy.forwardSensitiveHeadersThroughProxy,
+        );
       } on Object catch (error, stackTrace) {
         return finish(
           failure: RequestFailure(
@@ -321,6 +471,26 @@ class RequestEngine {
         return finish(failure: _transportFailure(current, response));
       }
 
+      // A fetcher that is assumed or declared inspectable must return
+      // redirects unfollowed. A different response URL proves it followed one
+      // on its own, so no hop after the first was validated. Discard the
+      // response rather than hand unvalidated content to the caller.
+      if (policy.requireInspectableRedirects &&
+          capabilities.redirectHandling ==
+              RedirectHandlingCapability.inspectable &&
+          !_isSameTarget(requestUrl, transportResponseUrl)) {
+        response = null;
+        return finish(
+          failure: RequestFailure(
+            code: RequestFailureCode.unsupportedCapability,
+            message:
+                'The fetcher followed a redirect itself, so the request '
+                'policy could not validate every hop.',
+            uri: current,
+          ),
+        );
+      }
+
       if (capabilities.redirectHandling ==
               RedirectHandlingCapability.unavailable &&
           transportOptions.followRedirects &&
@@ -368,7 +538,13 @@ class RequestEngine {
           ),
         );
       }
-      final normalizedNext = _normalizeHttpTarget(next);
+      var normalizedNext = _normalizeHttpTarget(next);
+      if (normalizedNext != null &&
+          (stripUserInfo ||
+              (policy.stripSensitiveHeadersOnCrossOriginRedirect &&
+                  !_isSameOrigin(current, normalizedNext)))) {
+        normalizedNext = _withoutUserInfo(normalizedNext);
+      }
       if (normalizedNext == null) {
         return finish(
           failure: RequestFailure(
@@ -460,11 +636,15 @@ class RequestEngine {
     final head = await _head(logicalUrl, requestUrl, options, context, headers);
     if (strategy == RequestMethodStrategy.head) return head;
 
-    // A timeout or caller cancellation ends the logical request. Treating
-    // either as an ordinary HEAD failure can start a fallback GET in the tiny
-    // interval between the deadline timer firing and the context clock
-    // observing that same deadline.
-    if (head.error case TimeoutException() || FetchCancellationException()) {
+    // The operation deadline or caller cancellation ends the logical request.
+    // Match the deadline by its marker type rather than by the context clock:
+    // the deadline timer can fire just before the context observes expiry, and
+    // a fallback GET started in that interval would outlive the operation. A
+    // per-attempt timeout is an ordinary HEAD failure and falls through to the
+    // GET fallback, which `_transportOptions` still refuses once no budget
+    // remains.
+    if (head.error
+        case _OperationDeadlineElapsed() || FetchCancellationException()) {
       return head;
     }
 
@@ -584,33 +764,28 @@ class RequestEngine {
     final remaining = context.remaining;
     if (remaining != null) {
       final deadline = Completer<T>();
-      deadlineTimer = Timer(
+      deadlineTimer = startDeadlineTimer(
         remaining,
-        () => deadline.completeError(
-          TimeoutException('Complete request deadline elapsed'),
-        ),
+        () => deadline.completeError(_OperationDeadlineElapsed()),
       );
       races.add(deadline.future);
     }
 
     final cancellation = context.cancellationSignal;
+    _CancellationRelay? relay;
     if (cancellation != null) {
-      final cancelled = Completer<T>();
-      cancellation
-          .then<void>(
-            (_) => cancelled.completeError(FetchCancellationException(uri)),
-            onError: (Object _, StackTrace _) {
-              cancelled.completeError(FetchCancellationException(uri));
-            },
-          )
-          .ignore();
-      races.add(cancelled.future);
+      relay = _CancellationRelay(uri).._listen(cancellation);
+      races.add(relay.future);
     }
 
     try {
       return await Future.any<T>(races);
     } finally {
       deadlineTimer?.cancel();
+      // The signal keeps its listener until it completes. Releasing the relay
+      // leaves that listener holding an empty relay instead of this race and
+      // its result.
+      relay?.release();
     }
   }
 
@@ -672,9 +847,47 @@ class RequestEngine {
     return result;
   }
 
-  static Uri _applyProxy(Uri target, String? proxyUrl) {
+  static Uri _applyProxy(
+    Uri target,
+    String? proxyUrl, {
+    required bool includeUserInfo,
+  }) {
     if (proxyUrl == null || proxyUrl.trim().isEmpty) return target;
-    return UrlNormalizer.applyProxy(target, proxyUrl);
+    return UrlNormalizer.applyProxy(
+      includeUserInfo ? target : _withoutUserInfo(target),
+      proxyUrl,
+    );
+  }
+
+  static bool _isEnrichment(RequestPurpose purpose) =>
+      purpose == RequestPurpose.oEmbed ||
+      purpose == RequestPurpose.manifest ||
+      purpose == RequestPurpose.enrichment;
+
+  static Uri _withoutUserInfo(Uri target) =>
+      target.userInfo.isEmpty ? target : target.replace(userInfo: '');
+
+  // Mirrors the origin comparison RequestPolicy uses for header stripping.
+  static bool _isSameOrigin(Uri a, Uri b) {
+    int effectivePort(Uri uri) => uri.hasPort
+        ? uri.port
+        : (uri.scheme.toLowerCase() == 'http' ? 80 : 443);
+    return a.scheme.toLowerCase() == b.scheme.toLowerCase() &&
+        a.host.toLowerCase() == b.host.toLowerCase() &&
+        effectivePort(a) == effectivePort(b);
+  }
+
+  // Whether a reported response URL names the requested target. Userinfo is
+  // ignored because some clients omit it from the reported URL without having
+  // followed a redirect.
+  static bool _isSameTarget(Uri requested, Uri reported) {
+    final normalizedRequested = _normalizeHttpTarget(
+      _withoutUserInfo(requested),
+    );
+    final normalizedReported = _normalizeHttpTarget(_withoutUserInfo(reported));
+    return normalizedRequested != null &&
+        normalizedReported != null &&
+        normalizedRequested.toString() == normalizedReported.toString();
   }
 
   static Uri? _normalizeHttpTarget(Uri target) {
@@ -763,7 +976,7 @@ class RequestEngine {
   }) {
     final error = context.isCancelled
         ? FetchCancellationException(uri)
-        : TimeoutException('Complete request deadline elapsed');
+        : _OperationDeadlineElapsed();
     return _MethodFetchResponse(
       url: uri,
       statusCode: null,
@@ -815,6 +1028,54 @@ class RequestEngine {
         status == 405 ||
         status == 501 ||
         (status >= 400 && status < 600);
+  }
+}
+
+/// The complete-operation deadline elapsed, as opposed to one attempt's
+/// [FetchOptions.timeout].
+///
+/// It remains a [TimeoutException] so callers that match timeouts by type keep
+/// working, while the engine can tell the terminal deadline apart from a
+/// per-attempt timeout that should still allow a fallback request.
+class _OperationDeadlineElapsed extends TimeoutException {
+  _OperationDeadlineElapsed() : super('Complete request deadline elapsed');
+}
+
+/// Relays a caller-owned cancellation signal into one lifetime race.
+///
+/// A [Future] cannot drop a listener before it completes, so a listener on a
+/// long-lived signal outlives the race that registered it. The listener
+/// closures are created in [_listen] and capture only this relay, and
+/// [release] drops the race's completer when the race ends. A signal that
+/// never completes therefore retains this small object rather than the race
+/// and the response it produced.
+final class _CancellationRelay {
+  _CancellationRelay(this._uri);
+
+  final Uri _uri;
+  Completer<Never>? _cancelled = Completer<Never>();
+
+  /// Fails with a [FetchCancellationException] when the signal completes
+  /// before [release]. Read it only before [release].
+  Future<Never> get future => _cancelled!.future;
+
+  /// Treats completion of [signal] with a value or an error as cancellation.
+  void _listen(Future<void> signal) {
+    signal
+        .then<void>(
+          (_) => _cancel(),
+          onError: (Object _, StackTrace _) => _cancel(),
+        )
+        .ignore();
+  }
+
+  void _cancel() {
+    _cancelled?.completeError(FetchCancellationException(_uri));
+  }
+
+  /// Detaches the race; a later signal completion does nothing.
+  void release() {
+    _cancelled = null;
   }
 }
 

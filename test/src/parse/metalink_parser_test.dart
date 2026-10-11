@@ -1,10 +1,13 @@
 import 'dart:convert';
 
 import 'package:metalink/src/model/diagnostics.dart';
+import 'package:metalink/src/model/link_metadata.dart';
 import 'package:metalink/src/options.dart';
 import 'package:metalink/src/parse/metalink_parser.dart';
 import 'package:metalink/src/result.dart';
 import 'package:test/test.dart';
+
+import '../../support/fixture_loader.dart';
 
 void main() {
   late MetaLinkParser parser;
@@ -93,5 +96,28 @@ void main() {
     expect(result.metadata.title, 'Usable');
     expect(result.status, ExtractionStatus.partial);
     expect(result.isSuccess, isTrue);
+  });
+
+  test('Yoast-style JSON-LD graphs yield page fields end to end', () async {
+    final pageUrl = Uri.parse('https://example.com/2024/sourdough-guide/');
+    final result = await parser.parseHtml(
+      readFixture('html/json_ld_yoast_graph.html'),
+      documentUrl: pageUrl,
+    );
+    final metadata = result.metadata;
+
+    expect(result.status, ExtractionStatus.success);
+    expect(metadata.title, 'Sourdough guide');
+    expect(metadata.description, 'A step-by-step sourdough guide.');
+    // The Article's publisher reference resolves to the Organization, and a
+    // publisher name takes precedence over the WebSite name.
+    expect(metadata.siteName, 'Example Bakery LLC');
+    expect(metadata.author, 'Jane Baker');
+    expect(metadata.kind, LinkKind.article);
+    expect(metadata.canonicalUrl, pageUrl);
+    expect(metadata.images.map((image) => image.url.toString()), [
+      'https://example.com/uploads/sourdough.jpg',
+    ]);
+    expect(metadata.publishedAt, DateTime.utc(2024, 3, 1, 8));
   });
 }

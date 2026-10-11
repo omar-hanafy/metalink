@@ -36,6 +36,61 @@ void main() {
       expect(UrlNormalizer.parseLoose('/only/path'), isNull);
     });
 
+    test('rejects http(s) schemes that lack the authority slashes', () {
+      expect(UrlNormalizer.parseLoose('https:/example.com'), isNull);
+      expect(UrlNormalizer.parseLoose('http:example.com'), isNull);
+      expect(UrlNormalizer.parseLoose('HTTPS:/example.com/path'), isNull);
+    });
+
+    test('rejects a scheme name that is not a well-formed URL', () {
+      // Each of these used to become a request to the host `http` or `https`.
+      const rejected = <String>[
+        'https//example.com/page',
+        'http//example.com',
+        'HTTPS//example.com',
+        'https ://example.com',
+        'http\t://example.com',
+        'https :example.com',
+        'https',
+        'http',
+        ' HTTPS ',
+        'https/page',
+        'http.',
+      ];
+      for (final input in rejected) {
+        expect(UrlNormalizer.parseLoose(input), isNull, reason: input);
+      }
+    });
+
+    test('keeps well-formed URLs and hosts that only start like a scheme', () {
+      final expected = <String, String>{
+        'https://example.com': 'https://example.com/',
+        'HTTP://Example.com/a': 'http://example.com/a',
+        'http.example.com/a': 'https://http.example.com/a',
+        'https-docs.example.com': 'https://https-docs.example.com/',
+        'httpbin.org/get': 'https://httpbin.org/get',
+        'example.com:8080/path': 'https://example.com:8080/path',
+      };
+      expected.forEach((input, output) {
+        expect(
+          UrlNormalizer.parseLoose(input)?.toString(),
+          output,
+          reason: input,
+        );
+      });
+    });
+
+    test('keeps host and port input that is not a scheme', () {
+      final withPort = UrlNormalizer.parseLoose('example.com:8080/path');
+      expect(withPort, isNotNull);
+      expect(withPort!.host, 'example.com');
+      expect(withPort.port, 8080);
+
+      final httpLikeHost = UrlNormalizer.parseLoose('http.example.com/a');
+      expect(httpLikeHost, isNotNull);
+      expect(httpLikeHost!.host, 'http.example.com');
+    });
+
     test('assumes https for host without scheme', () {
       final url = UrlNormalizer.parseLoose('example.com/abc');
       expect(url, isNotNull);

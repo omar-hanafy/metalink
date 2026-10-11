@@ -1,3 +1,4 @@
+import 'package:metalink/src/network/request_policy.dart';
 import 'package:metalink/src/network/request_target_safety.dart';
 import 'package:test/test.dart';
 
@@ -114,5 +115,136 @@ void main() {
         );
       },
     );
+  });
+
+  group('non-ASCII host safety', () {
+    // WHATWG and UTS #46 host canonicalization maps each of these to a
+    // loopback, metadata-service, or local name, but Dart's Uri keeps them
+    // percent-encoded, so ASCII-only checks never see the mapped form.
+    const canonicalizesToUnsafe = <String>[
+      'http://１２７.０.０.１/',
+      'http://127。0。0。1/',
+      'http://ⓛⓞⓒⓐⓛⓗⓞⓢⓣ/',
+      'http://１６９.２５４.１６９.２５４/latest/meta-data/',
+    ];
+
+    RequestTarget target(Uri uri) => RequestTarget(
+      uri: uri,
+      purpose: RequestPurpose.document,
+      stage: RequestTargetStage.initial,
+      redirectCount: 0,
+    );
+
+    test('rejects hosts that canonicalize to unsafe targets', () {
+      for (final value in canonicalizesToUnsafe) {
+        expect(
+          unsafeTargetReason(Uri.parse(value)),
+          allOf(contains('Non-ASCII'), contains('xn--')),
+          reason: value,
+        );
+      }
+    });
+
+    test(
+      'rejects Unicode and percent-encoded hosts however they are built',
+      () {
+        final hosts = <Uri>[
+          Uri.parse('http://bücher.example/'),
+          Uri(scheme: 'http', host: 'ⓛⓞⓒⓐⓛⓗⓞⓢⓣ', path: '/'),
+          Uri(scheme: 'http', host: '１２７.０.０.１', path: '/'),
+        ];
+
+        for (final uri in hosts) {
+          expect(unsafeTargetReason(uri), contains('xn--'), reason: '$uri');
+        }
+      },
+    );
+
+    test('secure policy rejects them before any request', () async {
+      final policy = RequestPolicy.secure();
+
+      for (final value in canonicalizesToUnsafe) {
+        final decision = await policy.validateTarget(target(Uri.parse(value)));
+        expect(decision.allowed, isFalse, reason: value);
+        expect(decision.reason, contains('xn--'), reason: value);
+      }
+    });
+
+    test(
+      'secure policy still allows punycode and ASCII public hosts',
+      () async {
+        final policy = RequestPolicy.secure();
+        const allowed = <String>[
+          'http://xn--bcher-kva.example/',
+          'https://xn--n3h.example/path',
+          'https://example.com/',
+          'https://sub.example.co.uk:8443/a?b=c',
+        ];
+
+        for (final value in allowed) {
+          expect(unsafeTargetReason(Uri.parse(value)), isNull, reason: value);
+          final decision = await policy.validateTarget(
+            target(Uri.parse(value)),
+          );
+          expect(decision.allowed, isTrue, reason: value);
+        }
+      },
+    );
+
+    test('keeps the scoped IPv6 rejection for zone identifiers', () {
+      expect(
+        unsafeTargetReason(Uri.parse('http://[fe80::1%25eth0]/')),
+        'Scoped IPv6 targets are not allowed.',
+      );
+    });
+
+    test('default policy behavior is unchanged', () async {
+      const policy = RequestPolicy();
+
+      for (final value in canonicalizesToUnsafe) {
+        final decision = await policy.validateTarget(target(Uri.parse(value)));
+        expect(decision.allowed, isTrue, reason: value);
+      }
+    });
+  });
+
+  group('local host-name aliases', () {
+    // Standard hosts-file aliases for loopback and link-local addresses, plus
+    // the AWS metadata short name, which resolves to 169.254.169.254 on EC2.
+    const aliases = <String>[
+      'ip6-localhost',
+      'ip6-loopback',
+      'localhost.localdomain',
+      'localhost4',
+      'localhost6',
+      'instance-data',
+    ];
+
+    test('rejects each alias, including its trailing-dot form', () {
+      for (final alias in aliases) {
+        for (final host in <String>[alias, '$alias.', alias.toUpperCase()]) {
+          expect(
+            unsafeTargetReason(Uri.parse('http://$host/')),
+            'Local and internal host names are not allowed.',
+            reason: host,
+          );
+        }
+      }
+    });
+
+    test('rejects a localhost name with several trailing dots', () {
+      expect(unsafeTargetReason(Uri.parse('http://localhost../')), isNotNull);
+    });
+
+    test('still allows public names that merely contain an alias', () {
+      const allowed = <String>[
+        'https://localhost4.example.com/',
+        'https://instance-data.example.com/',
+        'https://my-ip6-localhost.example/',
+      ];
+      for (final value in allowed) {
+        expect(unsafeTargetReason(Uri.parse(value)), isNull, reason: value);
+      }
+    });
   });
 }

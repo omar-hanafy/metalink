@@ -7,34 +7,37 @@ import 'package:metalink/src/cache/cache_store.dart';
 ///
 /// [MemoryCacheStore] keeps cache entries in memory using a [LinkedHashMap]
 /// for efficient LRU (Least Recently Used) ordering. Entries are evicted
-/// when [maxEntries] is exceeded.
+/// when the `maxEntries` limit is exceeded.
 ///
 /// ### When to Use
 /// * Use [MemoryCacheStore] for short-lived applications, testing, or when
 ///   cache persistence across restarts is not needed.
-/// * For persistent caching, use [HiveCacheStore] instead.
+/// * For persistent caching, use `HiveCacheStore` instead.
 ///
 /// ### Eviction Policy
-/// * When [maxEntries] is exceeded, the oldest (least recently used) entries
-///   are removed until the limit is satisfied.
+/// * When the `maxEntries` limit is exceeded, the oldest (least recently used)
+///   entries are removed until the limit is satisfied.
 /// * Expired entries are lazily removed on read or during [purgeExpired].
 ///
 /// See also:
-/// * [HiveCacheStore] for disk-based persistent caching.
+/// * `HiveCacheStore` for disk-based persistent caching.
 /// * [CacheStore] for the interface contract.
 class MemoryCacheStore implements CacheStore {
   /// Creates a [MemoryCacheStore] with the given configuration.
   ///
   /// ### Parameters
-  /// * [keyPrefix] - Prefix for all keys. Defaults to `metalink:`.
-  /// * [defaultTtl] - TTL for entries without explicit TTL. Defaults to 4 hours.
-  /// * [maxEntries] - Maximum number of entries before LRU eviction. Defaults to `500`.
+  /// * `keyPrefix` - Prefix for all keys. Defaults to `metalink:`.
+  /// * [defaultTtl] - Lifetime given to entries that request the store
+  ///   default, either through [CacheLifetime.storeDefault] or a nonpositive
+  ///   legacy [CacheEntry.ttlMs]. Defaults to 4 hours. A nonpositive value
+  ///   keeps those entries until they are evicted or removed.
+  /// * [maxEntries] - Maximum number of entries before LRU eviction. Defaults
+  ///   to `500`. A value of `0` or less keeps no entries.
   MemoryCacheStore({
-    String keyPrefix = 'metalink:',
+    this._keyPrefix = 'metalink:',
     Duration defaultTtl = const Duration(hours: 4),
     int maxEntries = 500,
-  }) : _keyPrefix = keyPrefix,
-       _defaultTtlMs = defaultTtl.inMilliseconds,
+  }) : _defaultTtlMs = defaultTtl.inMilliseconds,
        _maxEntries = maxEntries < 0 ? 0 : maxEntries;
 
   final String _keyPrefix;

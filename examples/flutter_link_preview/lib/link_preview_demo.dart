@@ -5,7 +5,15 @@ import 'package:metalink/metalink.dart';
 import 'package:metalink_showcase/link_preview_card.dart';
 
 class LinkPreviewDemo extends StatefulWidget {
-  const LinkPreviewDemo({super.key});
+  const LinkPreviewDemo({this.client, super.key});
+
+  /// The engine to extract with.
+  ///
+  /// When `null`, the demo creates a client with a secure request policy and
+  /// disposes it with the screen. An injected client is owned by the caller,
+  /// which keeps the screen testable without network access. The client is
+  /// read once, when the screen is first built.
+  final MetaLinkClient? client;
 
   @override
   State<LinkPreviewDemo> createState() => _LinkPreviewDemoState();
@@ -19,20 +27,15 @@ class _LinkPreviewDemoState extends State<LinkPreviewDemo> {
   ];
 
   final _urlController = TextEditingController(text: _examples.first);
-  final _client = MetaLinkClient(
-    options: MetaLinkClientOptions(
-      fetch: FetchOptions(
-        timeout: const Duration(seconds: 10),
-        totalTimeout: const Duration(seconds: 20),
-        requestPolicy: RequestPolicy.secure(),
-      ),
-      extract: const ExtractOptions(maxImages: 3, maxIcons: 3),
-      cache: const CacheOptions(enabled: true, ttl: Duration(minutes: 30)),
-    ),
-  );
+
+  // Decided together, once, in initState: a later rebuild that adds or drops
+  // `widget.client` must not change which client this screen disposes.
+  late final MetaLinkClient _client;
+  late final bool _ownsClient;
 
   ExtractionResult<LinkMetadata>? _result;
   Completer<void>? _cancellation;
+  String? _inputError;
   Object? _unexpectedError;
   bool _loading = false;
   int _requestSerial = 0;
@@ -40,14 +43,31 @@ class _LinkPreviewDemoState extends State<LinkPreviewDemo> {
   @override
   void initState() {
     super.initState();
+    final injected = widget.client;
+    _ownsClient = injected == null;
+    _client = injected ?? _createDefaultClient();
     unawaited(_extract());
+  }
+
+  static MetaLinkClient _createDefaultClient() {
+    return MetaLinkClient(
+      options: MetaLinkClientOptions(
+        fetch: FetchOptions(
+          timeout: const Duration(seconds: 10),
+          totalTimeout: const Duration(seconds: 20),
+          requestPolicy: RequestPolicy.secure(),
+        ),
+        extract: const ExtractOptions(maxImages: 3, maxIcons: 3),
+        cache: const CacheOptions(enabled: true, ttl: Duration(minutes: 30)),
+      ),
+    );
   }
 
   @override
   void dispose() {
     _cancelActiveRequest();
     _urlController.dispose();
-    unawaited(_client.dispose());
+    if (_ownsClient) unawaited(_client.dispose());
     super.dispose();
   }
 
@@ -69,9 +89,8 @@ class _LinkPreviewDemoState extends State<LinkPreviewDemo> {
         (uri.scheme != 'http' && uri.scheme != 'https')) {
       setState(() {
         _result = null;
-        _unexpectedError = const FormatException(
-          'Enter a complete http or https URL.',
-        );
+        _inputError = 'Enter a complete http or https URL.';
+        _unexpectedError = null;
         _loading = false;
       });
       return;
@@ -82,6 +101,7 @@ class _LinkPreviewDemoState extends State<LinkPreviewDemo> {
 
     setState(() {
       _loading = true;
+      _inputError = null;
       _unexpectedError = null;
     });
 
@@ -118,7 +138,7 @@ class _LinkPreviewDemoState extends State<LinkPreviewDemo> {
             end: Alignment.bottomRight,
             colors: [
               colorScheme.primaryContainer.withValues(alpha: 0.55),
-              const Color(0xFFF8F6FC),
+              colorScheme.surface,
               colorScheme.tertiaryContainer.withValues(alpha: 0.35),
             ],
           ),
@@ -159,9 +179,13 @@ class _LinkPreviewDemoState extends State<LinkPreviewDemo> {
     return Container(
       padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: 0.72),
+        // Theme roles rather than literal white keep the composer readable
+        // under a dark scheme; in the light scheme this role is white.
+        color: colorScheme.surfaceContainerLowest.withValues(alpha: 0.72),
         borderRadius: BorderRadius.circular(26),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.9)),
+        border: Border.all(
+          color: colorScheme.surfaceContainerLowest.withValues(alpha: 0.9),
+        ),
         boxShadow: const [
           BoxShadow(
             color: Color(0x160E0A2B),
@@ -201,9 +225,8 @@ class _LinkPreviewDemoState extends State<LinkPreviewDemo> {
             children: [
               Text(
                 'Try',
-                style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                  color: colorScheme.onSurfaceVariant,
-                ),
+                style: Theme.of(context).textTheme.labelLarge
+                    ?.copyWith(color: colorScheme.onSurfaceVariant),
               ),
               for (final url in _examples)
                 ActionChip(
@@ -246,12 +269,17 @@ class _LinkPreviewDemoState extends State<LinkPreviewDemo> {
       );
     }
 
+    // Invalid input is not retryable: the user has to change the URL first.
+    if (_inputError case final message?) {
+      return _ErrorPanel(message: message);
+    }
+
     final error = result?.primaryError?.message ?? _unexpectedError?.toString();
     if (error != null) {
+      final canRetry = result?.retryable ?? true;
       return _ErrorPanel(
         message: error,
-        canRetry: result?.retryable ?? true,
-        onRetry: () => unawaited(_extract(skipCache: true)),
+        onRetry: canRetry ? () => unawaited(_extract(skipCache: true)) : null,
       );
     }
 
@@ -309,43 +337,56 @@ class _ShowcaseHeader extends StatelessWidget {
 }
 
 class _ErrorPanel extends StatelessWidget {
-  const _ErrorPanel({
-    required this.message,
-    required this.canRetry,
-    required this.onRetry,
-  });
+  const _ErrorPanel({required this.message, this.onRetry});
 
   final String message;
-  final bool canRetry;
-  final VoidCallback onRetry;
+
+  /// Retries the extraction; `null` hides the action for errors that a retry
+  /// cannot fix.
+  final VoidCallback? onRetry;
 
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
-    return Container(
-      padding: const EdgeInsets.all(24),
-      decoration: BoxDecoration(
-        color: colorScheme.errorContainer,
-        borderRadius: BorderRadius.circular(24),
-      ),
-      child: Row(
-        children: [
-          Icon(
-            Icons.error_outline_rounded,
-            color: colorScheme.onErrorContainer,
-          ),
-          const SizedBox(width: 14),
-          Expanded(
-            child: Text(
-              message,
-              style: TextStyle(color: colorScheme.onErrorContainer),
+    // A live region makes screen readers announce the failure when it appears.
+    return Semantics(
+      liveRegion: true,
+      child: Container(
+        padding: const EdgeInsets.all(24),
+        decoration: BoxDecoration(
+          color: colorScheme.errorContainer,
+          borderRadius: BorderRadius.circular(24),
+        ),
+        // The retry action sits below the message so long messages and large
+        // text never squeeze the button off the panel.
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  Icons.error_outline_rounded,
+                  color: colorScheme.onErrorContainer,
+                ),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Text(
+                    message,
+                    style: TextStyle(color: colorScheme.onErrorContainer),
+                  ),
+                ),
+              ],
             ),
-          ),
-          if (canRetry) ...[
-            const SizedBox(width: 12),
-            TextButton(onPressed: onRetry, child: const Text('Try again')),
+            if (onRetry != null)
+              Align(
+                alignment: AlignmentDirectional.centerEnd,
+                child: TextButton(
+                  onPressed: onRetry,
+                  child: const Text('Try again'),
+                ),
+              ),
           ],
-        ],
+        ),
       ),
     );
   }

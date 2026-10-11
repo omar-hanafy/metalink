@@ -24,7 +24,8 @@ App Manifests while retaining diagnostics about how each field was selected.
 
 ## Requirements
 
-MetaLink supports Dart `>=3.11.0 <4.0.0`.
+MetaLink supports Dart `>=3.13.5 <4.0.0`. Flutter applications need Flutter
+3.47.7 or later, which ships Dart 3.13.5.
 
 ## Installation
 
@@ -38,7 +39,7 @@ Or declare it directly:
 
 ```yaml
 dependencies:
-  metalink: ^2.1.0
+  metalink: ^2.2.0
 ```
 
 ## Quick start
@@ -178,9 +179,12 @@ capability contract.
 The default request policy preserves MetaLink 2.x target compatibility while
 removing sensitive headers on cross-origin redirects. `RequestPolicy.secure()`
 additionally rejects common loopback, private-literal, link-local, multicast,
-and metadata-service targets and requires inspectable redirects. Server
-transports should still validate resolved DNS addresses and apply DNS-pinning
-controls appropriate to their environment.
+and metadata-service targets and requires inspectable redirects. It also
+rejects non-ASCII and percent-encoded host names, because Unicode
+canonicalization can turn them into those targets; pass internationalized
+hosts in their ASCII punycode (`xn--`) form. Server transports should still
+validate resolved DNS addresses and apply DNS-pinning controls appropriate to
+their environment.
 
 Browser transports cannot expose redirect responses. In compatibility mode,
 the browser can follow enabled redirects and MetaLink preserves the final URL,
@@ -212,8 +216,10 @@ the remaining URLs from being processed.
 
 ## Persistent Hive cache
 
-`HiveCacheStore.open` can initialize and own its Hive box. Supply an
-application-owned persistent path in production:
+`HiveCacheStore.open` opens and owns a Hive box without changing Hive's
+global configuration, so it never moves boxes your application opens itself.
+On native platforms, pass `path` unless your application already initialized
+Hive. Supply an application-owned persistent path in production:
 
 ```dart
 import 'dart:io';
@@ -236,7 +242,17 @@ try {
 ```
 
 The store is closed separately because an injected cache remains caller-owned.
-For short-lived or test-only caching, use `MemoryCacheStore`.
+Stores opened on the same box share it, and the box closes when the last of
+them closes; a box your application opened before calling `open` is never
+closed by MetaLink. When a box with that name is already open, Hive returns it
+unchanged, so `encryptionCipher`, `path`, and `crashRecovery` apply only when
+the box is first opened; give a store that needs different settings its own
+`boxName`. For short-lived or test-only caching, use `MemoryCacheStore`.
+
+A zero or negative `CacheOptions.ttl` means the store's default lifetime. When
+a client was created with caching disabled, a request that passes
+`CacheOptions(enabled: true)` caches in a `MemoryCacheStore` that the client
+creates and disposes.
 
 Custom cache implementations can use `CacheEntry.withLifetime` with
 `CacheLifetime.storeDefault()`, `CacheLifetime.neverExpires()`, or

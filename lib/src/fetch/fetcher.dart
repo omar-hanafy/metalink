@@ -123,11 +123,16 @@ class FetchResponse {
 /// It provides GET and HEAD methods with timeout and size limiting.
 ///
 /// ### Implementations
-/// * [HttpFetcher] - The default implementation using the `http` package.
+/// * `HttpFetcher` - The default implementation using the `http` package.
 ///
 /// ### Contract
 /// * Methods must not throw; errors are captured in [FetchResponse.error].
-/// * Inspectable transports return redirects without following them.
+/// * Unless an implementation also implements [CapabilityAwareFetcher] and
+///   declares other redirect handling, it must return redirect responses
+///   unfollowed and report the requested URL in [FetchResponse.url], so that
+///   MetaLink can validate every hop itself. When a policy sets
+///   `requireInspectableRedirects`, a fetcher assumed or declared inspectable
+///   that reports a different URL fails closed and its response is discarded.
 /// * A [CapabilityAwareFetcher] with
 ///   [RedirectHandlingCapability.unavailable] may follow redirects only when
 ///   [FetchOptions.followRedirects] allows it, and must report the final URL in
@@ -172,7 +177,10 @@ abstract interface class Fetcher {
 /// Optional extension of [Fetcher] that accepts an active cancellation signal.
 ///
 /// Existing [Fetcher] implementations remain source-compatible. Callers should
-/// check for this interface before passing an [abortTrigger].
+/// check for this interface before passing an `abortTrigger` to [get] or
+/// [head]. When that future completes, with a value or an error, the
+/// implementation should abort the in-flight request and report a
+/// [FetchCancellationException] in [FetchResponse.error].
 abstract interface class AbortableFetcher implements Fetcher {
   @override
   Future<FetchResponse> get(

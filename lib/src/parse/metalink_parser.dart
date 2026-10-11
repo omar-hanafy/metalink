@@ -21,11 +21,21 @@ import 'package:metalink/src/result.dart';
 /// raw response bytes and headers are available. Remote oEmbed and manifest
 /// enrichment is intentionally not performed by this class.
 class MetaLinkParser {
+  /// Creates a parser that runs the local extraction stages.
+  ///
+  /// The stages read Open Graph, Twitter Card, standard `<meta>` and
+  /// `<title>`, `<link rel>`, and JSON-LD metadata. `decoder` is the
+  /// [WebDecoder] that [parseResponse] uses to pick a character set and
+  /// decode response bytes; [parseHtml] does not use it. [rankingPolicy]
+  /// orders the scored candidates of every metadata field and so decides
+  /// which values win; it defaults to [DefaultRankingPolicy].
+  ///
+  /// Construction performs no I/O. Each parse call keeps its own extraction
+  /// state, so one parser can be reused for any number of documents.
   MetaLinkParser({
-    WebDecoder decoder = const WebDecoder(),
+    this._decoder = const WebDecoder(),
     RankingPolicy rankingPolicy = const DefaultRankingPolicy(),
-  }) : _decoder = decoder,
-       _pipeline = ExtractPipeline(
+  }) : _pipeline = ExtractPipeline(
          stages: const [
            OpenGraphExtractor(),
            TwitterCardExtractor(),

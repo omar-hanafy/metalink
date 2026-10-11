@@ -35,4 +35,30 @@ void main() {
     expect(decoded.meta['k'], ['v']);
     expect(decoded.links.first.rel, 'icon');
   });
+
+  test('RawMetadata.fromJson skips malformed link entries', () {
+    final decoded = RawMetadata.fromJson({
+      'meta': <String, dynamic>{},
+      'links': [
+        {'rel': 'icon', 'href': '/favicon.ico'},
+        'garbage',
+        null,
+      ],
+    });
+    expect(decoded.links, hasLength(1));
+    expect(decoded.links.single.rel, 'icon');
+    expect(decoded.links.single.href, '/favicon.ico');
+  });
+
+  test('RawMetadata.fromJson skips null values inside a meta list', () {
+    final decoded = RawMetadata.fromJson({
+      'meta': {
+        'keywords': ['a', null, 'b'],
+        'description': ['desc'],
+      },
+      'links': <dynamic>[],
+    });
+    expect(decoded.meta['keywords'], ['a', 'b']);
+    expect(decoded.meta['description'], ['desc']);
+  });
 }

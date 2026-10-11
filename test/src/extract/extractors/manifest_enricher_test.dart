@@ -131,4 +131,42 @@ void main() {
     );
     expect(fetcher.requests, hasLength(2));
   });
+
+  test('non-string manifest fields become null', () async {
+    final fetcher = FakeFetcher();
+    final url = Uri.parse('https://example.com/manifest.json');
+    fetcher.registerGetResponse(
+      url,
+      FakeFetcher.buildResponse(
+        url: url,
+        statusCode: 200,
+        headers: const {'content-type': 'application/manifest+json'},
+        bodyText:
+            '{"name":42,"short_name":true,"start_url":false,'
+            '"display":["standalone"],"background_color":1,'
+            '"theme_color":{"c":1},"icons":[{"src":true},'
+            '{"src":"/icon.png","sizes":192,"type":"image/png",'
+            '"purpose":["any"]}]}',
+      ),
+    );
+
+    final data = await const ManifestEnricher().fetchAndParse(
+      fetcher: fetcher,
+      fetchOptions: const FetchOptions(),
+      manifestUrl: url,
+    );
+
+    expect(data, isNotNull);
+    expect(data!.name, isNull);
+    expect(data.shortName, isNull);
+    expect(data.startUrl, isNull);
+    expect(data.display, isNull);
+    expect(data.backgroundColor, isNull);
+    expect(data.themeColor, isNull);
+    expect(data.icons, hasLength(1));
+    expect(data.icons.single.src, Uri.parse('https://example.com/icon.png'));
+    expect(data.icons.single.sizes, isNull);
+    expect(data.icons.single.type, 'image/png');
+    expect(data.icons.single.purpose, isNull);
+  });
 }

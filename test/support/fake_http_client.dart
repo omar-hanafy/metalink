@@ -3,8 +3,9 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
-typedef RequestHandler =
-    Future<http.StreamedResponse> Function(http.BaseRequest request);
+typedef RequestHandler = Future<http.StreamedResponse> Function(
+  http.BaseRequest request,
+);
 
 class RecordingHttpClient extends http.BaseClient {
   RecordingHttpClient({required this.handler});

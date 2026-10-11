@@ -2,12 +2,12 @@
 ///
 /// Determines how the cached payload is serialized and deserialized.
 enum CachePayloadKind {
-  /// Stores only the final [LinkMetadata] object.
+  /// Stores only the final `LinkMetadata` object.
   ///
   /// Smaller payload size, but loses diagnostics and provenance information.
   linkMetadata,
 
-  /// Stores the complete [ExtractionResult], including diagnostics and warnings.
+  /// Stores the complete `ExtractionResult`, including diagnostics and warnings.
   ///
   /// Larger payload, but preserves full extraction context for debugging.
   extractionResult,
@@ -50,7 +50,7 @@ class CacheLifetime {
 
   /// Expires the entry after [durationMs] milliseconds.
   const CacheLifetime.expiresAfterMilliseconds(int durationMs)
-    : assert(durationMs >= 0),
+    : assert(durationMs >= 0, 'durationMs must not be negative'),
       durationMs = durationMs,
       kind = CacheLifetimeKind.expiresAfter;
 
@@ -64,11 +64,20 @@ class CacheLifetime {
   Duration? get duration =>
       durationMs == null ? null : Duration(milliseconds: durationMs!);
 
+  /// A JSON-compatible map that [CacheLifetime.fromJson] can read back.
+  ///
+  /// The map holds the [kind] name and, only for an expiring lifetime, the
+  /// [durationMs] value.
   Map<String, dynamic> toJson() => <String, dynamic>{
     'kind': kind.name,
     if (durationMs != null) 'durationMs': durationMs,
   };
 
+  /// Creates a lifetime from a map produced by [CacheLifetime.toJson].
+  ///
+  /// Throws a [FormatException] when `kind` is not the name of a
+  /// [CacheLifetimeKind], or when an expiring lifetime lacks a nonnegative
+  /// integer `durationMs`. Other kinds ignore `durationMs`.
   factory CacheLifetime.fromJson(Map<String, dynamic> json) {
     final kindRaw = json['kind'];
     if (kindRaw is! String) {
@@ -138,9 +147,9 @@ class CacheEntry {
     required this.kind,
     required this.createdAtMs,
     required this.ttlMs,
-    required CacheLifetime explicitLifetime,
+    required CacheLifetime this._explicitLifetime,
     required this.payload,
-  }) : _explicitLifetime = explicitLifetime;
+  });
 
   /// The type of data stored (e.g., just the metadata or the full result).
   final CachePayloadKind kind;
@@ -195,6 +204,10 @@ class CacheEntry {
     );
   }
 
+  /// A JSON-compatible map that [CacheEntry.fromJson] can read back.
+  ///
+  /// The map records both the legacy [ttlMs] value and the explicit
+  /// [lifetime], and it references [payload] without copying it.
   Map<String, dynamic> toJson() {
     return <String, dynamic>{
       'kind': kind.name,
@@ -205,6 +218,15 @@ class CacheEntry {
     };
   }
 
+  /// Creates an entry from a map produced by [CacheEntry.toJson].
+  ///
+  /// A map without a `lifetime` value is read as a legacy entry, so its
+  /// lifetime derives from `ttlMs` as described for the [CacheEntry.new]
+  /// constructor. The `payload` map is copied shallowly.
+  ///
+  /// Throws a [FormatException] when `kind`, `createdAtMs`, `ttlMs`,
+  /// `payload`, or `lifetime` has an unexpected type, or when `kind` does not
+  /// name a [CachePayloadKind].
   factory CacheEntry.fromJson(Map<String, dynamic> json) {
     final kindRaw = json['kind'];
     final createdAtMsRaw = json['createdAtMs'];
@@ -256,6 +278,10 @@ class CacheEntry {
 /// * [isMiss] - No entry found (not an error).
 /// * [isError] - Read failed due to an exception.
 class CacheReadResult {
+  /// Creates a read outcome.
+  ///
+  /// Pass a non-null [entry] for a hit, a `null` [entry] without an [error]
+  /// for a miss, or an [error] and its [stackTrace] when the read failed.
   const CacheReadResult({required this.entry, this.error, this.stackTrace});
 
   /// The cached entry, or `null` if not found or an error occurred.
@@ -279,6 +305,11 @@ class CacheReadResult {
 
 /// The result of a cache write operation.
 class CacheWriteResult {
+  /// Creates a write outcome.
+  ///
+  /// Set [ok] to `false` and supply [error] and its [stackTrace] when the
+  /// write failed. The built-in stores report an already-expired entry that
+  /// they skip as a successful write.
   const CacheWriteResult({required this.ok, this.error, this.stackTrace});
 
   /// `true` if the write succeeded, `false` otherwise.
@@ -293,6 +324,10 @@ class CacheWriteResult {
 
 /// The result of a cache operation (delete, clear).
 class CacheOpResult {
+  /// Creates a delete or clear outcome.
+  ///
+  /// Set [ok] to `false` and supply [error] and its [stackTrace] when the
+  /// operation failed.
   const CacheOpResult({required this.ok, this.error, this.stackTrace});
 
   /// `true` if the operation succeeded, `false` otherwise.
@@ -307,6 +342,9 @@ class CacheOpResult {
 
 /// The result of a cache purge operation.
 class CachePurgeResult {
+  /// Creates a purge outcome that reports how many entries were [purged].
+  ///
+  /// Supply [error] and its [stackTrace] when the purge failed.
   const CachePurgeResult({
     required this.ok,
     required this.purged,

@@ -82,4 +82,13 @@ void main() {
     });
     expect(decoded.images.length, 1);
   });
+
+  test('LinkMetadata.fromJson skips invalid keyword entries', () {
+    final decoded = LinkMetadata.fromJson({
+      'originalUrl': 'https://example.com',
+      'resolvedUrl': 'https://example.com',
+      'keywords': ['dart', 'flutter', null],
+    });
+    expect(decoded.keywords, ['dart', 'flutter']);
+  });
 }
